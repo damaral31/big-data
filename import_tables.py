@@ -1,106 +1,126 @@
+"""Load the MIMIC-III tables this project needs into BigQuery.
+
+Pipeline per table:
+  1. stream the .csv.gz from the U.Porto mirror straight into a GCS bucket
+     (no large local download), then
+  2. create/replace a BigQuery table from that GCS object.
+
+Tables loaded (everything the LOS pipeline queries):
+  patients, admissions, icustays, d_items, chartevents (~4.2 GB, ~330M rows).
+
+Schemas use NULLABLE for non-key columns on purpose: the official MIMIC DDL
+marks several columns NOT NULL, but the public CSV mirror contains rows that
+violate a few of those (e.g. ADMISSION_LOCATION, ICUSTAY_ID in CHARTEVENTS),
+which makes a strict load fail. Keys stay REQUIRED.
+
+Usage:
+    export GCP_PROJECT_ID=...   GOOGLE_APPLICATION_CREDENTIALS=./gcp_key.json
+    python import_tables.py                  # load everything
+    python import_tables.py icustays d_items # load a subset
+"""
+from __future__ import annotations
+
 import os
+import sys
+
 import requests
-from google.cloud import bigquery
-from google.cloud import storage
+from google.cloud import bigquery, storage
 
-# 1. Autenticação
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = r"./gcp_key.json"
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "big-data-497416")
+MIMIC_DATASET = os.environ.get("MIMIC_DATASET", "mimic_prod")
+BUCKET_NAME = os.environ.get("MIMIC_BUCKET", "big-data-visty-up")
+BASE_URL = "https://www.dcc.fc.up.pt/~ines/MIMIC-III"
 
-GCP_PROJECT_ID = "big-data-497416"
-MIMIC_DATASET = "mimic_prod"
-# COLOCA AQUI O NOME DO TEU BUCKET (o que criaste no início do projeto)
-BUCKET_NAME = "big-data-visty-up" 
+bq = bigquery.Client(project=GCP_PROJECT_ID)
+gcs = storage.Client(project=GCP_PROJECT_ID)
 
-bq_client = bigquery.Client(project=GCP_PROJECT_ID)
-storage_client = storage.Client(project=GCP_PROJECT_ID)
+S = bigquery.SchemaField
+REQ, NUL = "REQUIRED", "NULLABLE"
+TS, INT, FLT, STR = "TIMESTAMP", "INTEGER", "FLOAT", "STRING"
 
-def transferir_para_gcs_e_bq(url_origem, nome_tabela, esquema):
-    nome_ficheiro = f"{nome_tabela.upper()}.csv.gz"
-    bucket = storage_client.bucket(BUCKET_NAME)
-    blob = bucket.blob(nome_ficheiro)
-    
-    # Passo A: Baixar da UP e enviar para o Cloud Storage
-    print(f"📦 A transferir {nome_ficheiro} da UP para o Google Cloud Storage...")
-    response = requests.get(url_origem, stream=True)
-    if response.status_code == 200:
-        # Envia o fluxo de dados diretamente para o teu bucket sem encher o teu disco local
-        blob.upload_from_file(response.raw, content_type="application/gzip")
-        print(f"  ✓ Guardado em gs://{BUCKET_NAME}/{nome_ficheiro}")
-    else:
-        raise Exception(f"Erro ao aceder ao link da UP: Status {response.status_code}")
+SCHEMAS: dict[str, list] = {
+    "patients": [
+        S("ROW_ID", INT, REQ), S("SUBJECT_ID", INT, REQ), S("GENDER", STR, NUL),
+        S("DOB", TS, NUL), S("DOD", TS, NUL), S("DOD_HOSP", TS, NUL),
+        S("DOD_SSN", TS, NUL), S("EXPIRE_FLAG", INT, NUL),
+    ],
+    "admissions": [
+        S("ROW_ID", INT, REQ), S("SUBJECT_ID", INT, REQ), S("HADM_ID", INT, REQ),
+        S("ADMITTIME", TS, NUL), S("DISCHTIME", TS, NUL), S("DEATHTIME", TS, NUL),
+        S("ADMISSION_TYPE", STR, NUL), S("ADMISSION_LOCATION", STR, NUL),
+        S("DISCHARGE_LOCATION", STR, NUL), S("INSURANCE", STR, NUL),
+        S("LANGUAGE", STR, NUL), S("RELIGION", STR, NUL),
+        S("MARITAL_STATUS", STR, NUL), S("ETHNICITY", STR, NUL),
+        S("EDREGTIME", TS, NUL), S("EDOUTTIME", TS, NUL), S("DIAGNOSIS", STR, NUL),
+        S("HOSPITAL_EXPIRE_FLAG", INT, NUL), S("HAS_CHARTEVENTS_DATA", INT, NUL),
+    ],
+    "icustays": [
+        S("ROW_ID", INT, REQ), S("SUBJECT_ID", INT, REQ), S("HADM_ID", INT, REQ),
+        S("ICUSTAY_ID", INT, REQ), S("DBSOURCE", STR, NUL),
+        S("FIRST_CAREUNIT", STR, NUL), S("LAST_CAREUNIT", STR, NUL),
+        S("FIRST_WARDID", INT, NUL), S("LAST_WARDID", INT, NUL),
+        S("INTIME", TS, NUL), S("OUTTIME", TS, NUL), S("LOS", FLT, NUL),
+    ],
+    "d_items": [
+        S("ROW_ID", INT, REQ), S("ITEMID", INT, REQ), S("LABEL", STR, NUL),
+        S("ABBREVIATION", STR, NUL), S("DBSOURCE", STR, NUL),
+        S("LINKSTO", STR, NUL), S("CATEGORY", STR, NUL), S("UNITNAME", STR, NUL),
+        S("PARAM_TYPE", STR, NUL), S("CONCEPTID", INT, NUL),
+    ],
+    "chartevents": [
+        S("ROW_ID", INT, REQ), S("SUBJECT_ID", INT, REQ), S("HADM_ID", INT, NUL),
+        S("ICUSTAY_ID", INT, NUL), S("ITEMID", INT, NUL), S("CHARTTIME", TS, NUL),
+        S("STORETIME", TS, NUL), S("CGID", INT, NUL), S("VALUE", STR, NUL),
+        S("VALUENUM", FLT, NUL), S("VALUEUOM", STR, NUL), S("WARNING", INT, NUL),
+        S("ERROR", INT, NUL), S("RESULTSTATUS", STR, NUL), S("STOPPED", STR, NUL),
+    ],
+}
 
-    # Passo B: Criar a tabela no BigQuery apontando para o GCS
-    print(f"🏛️ A indexar '{nome_tabela}' no BigQuery...")
-    table_id = f"{GCP_PROJECT_ID}.{MIMIC_DATASET}.{nome_tabela}"
-    gcs_uri = f"gs://{BUCKET_NAME}/{nome_ficheiro}"
-    
+LOAD_ORDER = ["patients", "admissions", "icustays", "d_items", "chartevents"]
+
+
+def stream_to_gcs(table: str) -> str:
+    blob_name = f"{table.upper()}.csv.gz"
+    blob = gcs.bucket(BUCKET_NAME).blob(blob_name)
+    if blob.exists():
+        print(f"  · gs://{BUCKET_NAME}/{blob_name} already present, reusing")
+        return f"gs://{BUCKET_NAME}/{blob_name}"
+    url = f"{BASE_URL}/{blob_name}"
+    print(f"  ↳ streaming {url} -> gs://{BUCKET_NAME}/{blob_name}")
+    with requests.get(url, stream=True, timeout=600) as r:
+        r.raise_for_status()
+        blob.upload_from_file(r.raw, content_type="application/gzip")
+    return f"gs://{BUCKET_NAME}/{blob_name}"
+
+
+def load_table(table: str) -> None:
+    print(f"[{table}]")
+    uri = stream_to_gcs(table)
+    table_id = f"{GCP_PROJECT_ID}.{MIMIC_DATASET}.{table}"
     job_config = bigquery.LoadJobConfig(
-        schema=esquema,
+        schema=SCHEMAS[table],
         skip_leading_rows=1,
         source_format=bigquery.SourceFormat.CSV,
+        allow_quoted_newlines=True,
+        write_disposition="WRITE_TRUNCATE",
+        max_bad_records=100,  # tolerate a handful of malformed rows in the mirror
     )
-    
-    load_job = bq_client.load_table_from_uri(gcs_uri, table_id, job_config=job_config)
-    load_job.result()  # Aguarda a conclusão do BigQuery
-    print(f"  ✓ Tabela '{nome_tabela}' pronta a usar!\n")
+    job = bq.load_table_from_uri(uri, table_id, job_config=job_config)
+    job.result()
+    n = bq.get_table(table_id).num_rows
+    print(f"  ✓ {table_id}: {n:,} rows\n")
 
-# ==============================================================================
-# ESQUEMAS FORMAIS DO MIMIC-III
-# ==============================================================================
-esquema_admissions = [
-    bigquery.SchemaField("ROW_ID", "INTEGER", mode="REQUIRED"),
-    bigquery.SchemaField("SUBJECT_ID", "INTEGER", mode="REQUIRED"),
-    bigquery.SchemaField("HADM_ID", "INTEGER", mode="REQUIRED"),
-    bigquery.SchemaField("ADMITTIME", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("DISCHTIME", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("DEATHTIME", "TIMESTAMP", mode="NULLABLE"),
-    bigquery.SchemaField("ADMISSION_TYPE", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("ADMISSION_LOCATION", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("DISCHARGE_LOCATION", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("INSURANCE", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("LANGUAGE", "STRING", mode="NULLABLE"),
-    bigquery.SchemaField("RELIGION", "STRING", mode="NULLABLE"),
-    bigquery.SchemaField("MARITAL_STATUS", "STRING", mode="NULLABLE"),
-    bigquery.SchemaField("ETHNICITY", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("EDREGTIME", "TIMESTAMP", mode="NULLABLE"),
-    bigquery.SchemaField("EDOUTTIME", "TIMESTAMP", mode="NULLABLE"),
-    bigquery.SchemaField("DIAGNOSIS", "STRING", mode="NULLABLE"),
-    bigquery.SchemaField("HOSPITAL_EXPIRE_FLAG", "INTEGER", mode="REQUIRED"),
-    bigquery.SchemaField("HAS_CHARTEVENTS_DATA", "INTEGER", mode="REQUIRED"),
-]
 
-esquema_icustays = [
-    bigquery.SchemaField("ROW_ID", "INTEGER", mode="REQUIRED"),
-    bigquery.SchemaField("SUBJECT_ID", "INTEGER", mode="REQUIRED"),
-    bigquery.SchemaField("HADM_ID", "INTEGER", mode="REQUIRED"),
-    bigquery.SchemaField("ICUSTAY_ID", "INTEGER", mode="REQUIRED"),
-    bigquery.SchemaField("DBSOURCE", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("FIRST_CAREUNIT", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("LAST_CAREUNIT", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("FIRST_WARDID", "INTEGER", mode="REQUIRED"),
-    bigquery.SchemaField("LAST_WARDID", "INTEGER", mode="REQUIRED"),
-    bigquery.SchemaField("INTIME", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("OUTTIME", "TIMESTAMP", mode="NULLABLE"),  # <- Corrigido para NULLABLE
-    bigquery.SchemaField("LOS", "FLOAT", mode="NULLABLE"),          # <- Garantido como NULLABLE
-]
+def main(tables: list[str]) -> None:
+    bq.create_dataset(MIMIC_DATASET, exists_ok=True)
+    for t in tables:
+        if t not in SCHEMAS:
+            print(f"!! unknown table '{t}', skipping")
+            continue
+        load_table(t)
+    print("Done.")
 
-# ==============================================================================
-# EXECUÇÃO DO FLUXO
-# ==============================================================================
-try:
-    transferir_para_gcs_e_bq(
-        "https://www.dcc.fc.up.pt/~ines/MIMIC-III/ADMISSIONS.csv.gz", 
-        "admissions", 
-        esquema_admissions
-    )
-    
-    transferir_para_gcs_e_bq(
-        "https://www.dcc.fc.up.pt/~ines/MIMIC-III/ICUSTAYS.csv.gz", 
-        "icustays", 
-        esquema_icustays
-    )
-    
-    print("🚀 Sucesso total! Dados reais injetados no BigQuery.")
 
-except Exception as e:
-    print(f"❌ Erro crítico: {e}")
+if __name__ == "__main__":
+    requested = [t.lower() for t in sys.argv[1:]] or LOAD_ORDER
+    main(requested)

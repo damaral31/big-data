@@ -1,0 +1,25 @@
+# MIMIC-III ICU Length-of-Stay prediction pipeline
+# Tested on Python 3.11-3.14
+
+# --- Core data / ML ---
+numpy>=1.26
+pandas>=2.2
+scipy>=1.13
+scikit-learn>=1.4
+xgboost>=2.0
+lightgbm>=4.0
+
+# --- Visualization ---
+matplotlib>=3.8
+seaborn>=0.13
+
+# --- BigQuery (primary big-data path) ---
+google-cloud-bigquery>=3.20
+google-cloud-storage>=2.16
+db-dtypes>=1.2        # required for BigQuery -> pandas TIMESTAMP/NUMERIC columns
+pyarrow>=15.0         # parquet caching + fast BQ downloads
+
+# --- Notebook / profiling ---
+jupyter>=1.0
+ipykernel>=6.29
+tqdm>=4.66

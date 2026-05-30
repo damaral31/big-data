@@ -1,145 +1,109 @@
-# MIMIC-III Length of Stay (LOS) Prediction - ML Pipeline
+# MIMIC-III — ICU Length-of-Stay Prediction
 
-## Project Overview
+Predict a patient's **ICU length of stay (LOS, in days)** from the **first 24 hours** of
+bedside chart events in MIMIC-III, using BigQuery to handle the 330M-row CHARTEVENTS table
+and scikit-learn / XGBoost / LightGBM for modelling.
 
-This project implements a **comprehensive machine learning pipeline** for predicting ICU length of stay (LOS) using the MIMIC-III dataset. The solution demonstrates state-of-the-art approaches in healthcare data science.
-
-### Key Objectives
-1. **Data Efficiency**: Handle 4.2GB CHARTEVENTS data using BigQuery
-2. **ML Excellence**: Compare 8 models with rigorous cross-validation
-3. **Clinical Relevance**: Early prediction (first 24 hours) for intervention
-4. **Interpretability**: Explainable models suitable for clinical deployment
-5. **Performance Profiling**: Track and optimize execution time
-
-### Expected Performance
-- **MAE**: 1.5-2.5 days | **R²**: 0.60-0.70
-- **Accuracy**: 35-45% within ±1 day | **Training**: 20-60 minutes
+This is a university Big-Data course project. The emphasis is on doing the data engineering
+and the evaluation **honestly and at scale**, not on chasing an unrealistic score.
 
 ---
 
-## Project Structure
+## What the pipeline does
+
+1. **Scale.** CHARTEVENTS is ~330M rows / 4.2 GB compressed. We never download it. Cohort
+   selection, first-24h filtering, error/range cleaning, CareVue↔MetaVision ITEMID
+   harmonization and per-concept aggregation are all pushed into **BigQuery SQL**
+   ([`src/data/sql.py`](src/data/sql.py)); only a compact aggregated table (one row per
+   ICU stay × concept) is downloaded.
+2. **Leak-free features.** Only first-24h data feeds the model; measurement counts are
+   window-capped (severity proxy, not a stay-length proxy); age is clipped to 90 to undo
+   MIMIC's >89y / ~300y DOB shift; imputation is fit inside CV folds.
+   ([`src/features/engineering.py`](src/features/engineering.py))
+3. **Honest validation.** Train/test split is **grouped by `SUBJECT_ID`** (no patient in
+   both sides; [`src/data/splits.py`](src/data/splits.py)). Models are compared with
+   **GroupKFold** CV against trivial baselines, and **both** framings are reported:
+   - **regression** — predict LOS in days (MAE / RMSE / R²),
+   - **classification** — short (<3d) / medium (3–7d) / long (>7d), with accuracy, macro-F1,
+     quadratic-weighted Cohen's κ and one-vs-rest AUROC.
+4. **Profiling.** Every phase is timed; the notebook prints a per-phase table and total
+   runtime ([`src/evaluation/profiling.py`](src/evaluation/profiling.py)).
+
+> **A realistic-expectations note:** continuous ICU-LOS is hard. Published R² is commonly
+> **~0.05–0.30**, which is why the literature usually prefers the bucketed/ordinal framing
+> (e.g. Harutyunyan et al. 2019 report quadratic κ ≈ 0.43). If you see R² near 0.7 on this
+> task, suspect leakage. We report modest numbers *and* beat trivial baselines — the lift is
+> what matters.
+
+---
+
+## Project layout
 
 ```
-src/                               # Core modules
-├── config.py                      # Configuration
-├── data/loader.py                 # BigQuery integration
-├── data/preprocessor.py           # Data cleaning
-├── features/engineering.py        # Feature extraction
-├── models/base.py                 # ML models (8 algorithms)
-├── evaluation/metrics.py          # Evaluation & profiling
-└── visualization/plots.py         # Plotting functions
+src/
+  config.py                 # all tunables (window, thresholds, CV, paths, GCP)
+  data/
+    concepts.py             # CareVue/MetaVision ITEMID -> concept + valid ranges
+    sql.py                  # BigQuery query builders (the big-data core)
+    loader.py               # BigQuery-first loader w/ parquet cache + synthetic fallback
+    synthetic.py            # clearly-labelled synthetic cohort (same shape as real)
+    splits.py               # grouped (by SUBJECT_ID) train/test split + GroupKFold
+  features/engineering.py   # long aggregates + demographics -> leak-free model matrix
+  models/registry.py        # sklearn Pipelines for regression & classification
+  evaluation/
+    metrics.py              # regression + classification metrics, error-by-LOS-band
+    harness.py              # GroupKFold CV, hold-out eval, RandomizedSearchCV
+    profiling.py            # execution-time profiler
+  visualization/plots.py    # per-patient timeline, distributions, comparisons, etc.
 
-notebooks/main.ipynb               # Main runnable notebook
-reports/sota_comparison.md         # SOTA analysis (A+ quality)
+import_tables.py            # load patients/admissions/icustays/d_items/chartevents into BigQuery
+main.ipynb                  # the annotated, runnable orchestrator
+reports/REPORT.md           # methodology + results write-up (fill in numbers from a real run)
+requirements.txt
 ```
 
 ---
 
-## Quick Start
+## Quick start
 
-### Installation
 ```bash
+python -m venv .venv && . .venv/Scripts/activate    # Windows; use bin/activate on *nix
 pip install -r requirements.txt
-jupyter notebook notebooks/main.ipynb
+jupyter notebook main.ipynb
 ```
 
-### GCP Setup (Optional)
-```bash
-# Set up BigQuery credentials
-export GOOGLE_APPLICATION_CREDENTIALS="./gcp_key.json"
-# Update GCP_PROJECT_ID in src/config.py
-```
+The notebook runs **out of the box on labelled synthetic data** (clearly banner-flagged) so
+you can see the whole pipeline without credentials.
 
-### Run Pipeline
-Notebook includes:
-1. Data loading from BigQuery
-2. EDA with visualizations
-3. Feature engineering (temporal + demographic)
-4. Model training (8 models × 5-fold CV)
-5. Comprehensive evaluation
-6. Performance profiling
-7. SOTA-aligned recommendations
+### Running on the real MIMIC-III data (BigQuery)
+
+1. Put a GCP service-account key at `./gcp_key.json` (or set
+   `GOOGLE_APPLICATION_CREDENTIALS`). Set `GCP_PROJECT_ID` / `MIMIC_DATASET` /
+   `MIMIC_BUCKET` env vars if they differ from the defaults in `src/config.py`.
+2. Load the tables once: `python import_tables.py`
+   (streams each `.csv.gz` from the U.Porto mirror → GCS → BigQuery).
+3. In `main.ipynb` cell 0, leave `USE_BIGQUERY = True` and run all.
+
+Results from the synthetic path are **demonstrations, not findings** — the notebook says so
+loudly. Only numbers produced with `DATA SOURCE: BIGQUERY` go in your report.
 
 ---
 
-## Models Included
+## Key design choices (and why)
 
-| Model | Type | Performance | Interpretability |
-|-------|------|-------------|------------------|
-| Linear Regression | Baseline | Good | Excellent |
-| Logistic Regression | Classification | Good | Excellent |
-| Random Forest | Ensemble | Very Good | Good |
-| **Gradient Boosting** | Ensemble | Excellent | Good |
-| **XGBoost** | Ensemble | Excellent | Good |
-| **LightGBM** | Ensemble | Excellent | Good |
-| SVR | Non-linear | Good | Poor |
-| KNN | Instance-based | Good | Fair |
-
-*Bold = Recommended; Focus on tree-based for SOTA performance*
-
----
-
-## SOTA Analysis
-
-### Why Tree Models?
-✅ Proven SOTA on tabular/clinical data (Rajkomar et al., 2018)  
-✅ Superior to DL on small datasets (~40K samples)  
-✅ Interpretable for clinical adoption  
-✅ Fast training/inference  
-✅ Handle missing data robustly  
-
-### Performance Benchmarks
-- **Baseline (Linear)**: R² 0.40-0.50, MAE 2.0-3.0 days
-- **Our Approach**: R² 0.60-0.70, MAE 1.5-2.5 days
-- **SOTA (GB Ensemble)**: R² 0.65-0.75, MAE 1.2-2.0 days
-
-**Detailed comparison**: `reports/sota_comparison.md`
-
----
-
-## Key Features for A+ Grade
-
-✅ Comprehensive big data pipeline with BigQuery  
-✅ Rigorous ML methodology (8 models, k-fold CV, proper splits)  
-✅ Clinical relevance (first 24h, per-range analysis)  
-✅ Full interpretability (feature importance, error analysis)  
-✅ Performance profiling (execution time tracking)  
-✅ SOTA-aligned approach with detailed justification  
-✅ Production-ready, modular code  
-
----
-
-## Example Usage
-
-```python
-from src.data.loader import MIMICDataLoader
-from src.models.base import ModelFactory
-
-# Load data
-loader = MIMICDataLoader()
-admissions = loader.get_admissions()
-
-# Train model
-model = ModelFactory.create_model('xgboost', task_type='regression')
-model.fit(X_train, y_train, X_val, y_val)
-
-# Predict
-predictions = model.predict(X_test)
-```
-
----
+| Choice | Rationale |
+|---|---|
+| Target = **ICU LOS days**, predicted **at 24h** | Early enough to inform staffing/beds, late enough for a full day of vitals. Cohort = stays still in ICU at 24h. |
+| Aggregate **in BigQuery**, train locally | Turns a 4.2 GB scan into a few-hundred-thousand-row download; the actual "big data" answer. |
+| **Tree ensembles** (RF / HistGB / XGBoost / LightGBM) | SOTA on tabular clinical data at this cohort size (~40–60k stays); interpretable; deep learning is unwarranted here. |
+| **Grouped** split + CV by SUBJECT_ID | A patient can have many stays; random splitting leaks patient signal. |
+| Report **regression *and* classification** vs **baselines** | LOS regression is intrinsically low-R²; classification is the standard, more useful framing; baselines prove the lift is real. |
 
 ## References
 
-1. **Rajkomar et al. (2018)** - Scalable deep learning for EHR - *Nature Medicine*
-2. **Johnson et al. (2016)** - MIMIC-III dataset - *Scientific Data*
-3. **Chen & Guestrin (2016)** - XGBoost - *KDD*
-4. **Bergstra & Bengio (2012)** - Hyperparameter optimization - *JMLR*
-5. **Pollard et al. (2018)** - eICU dataset - *arXiv*
-
----
-
-## Status
-✅ Production-ready | ✅ A+ grade quality | ✅ SOTA-aligned
-
-See notebook for full pipeline execution and detailed analysis.
+- Johnson et al. (2016), *MIMIC-III, a freely accessible critical care database*, Sci. Data.
+- Harutyunyan et al. (2019), *Multitask learning and benchmarking with clinical time series*
+  (LOS benchmark; quadratic-κ framing).
+- Wang et al. (2020), *MIMIC-Extract* (first-24h feature pipeline; leakage controls).
+- Grinsztajn et al. (2022), *Why do tree-based models still outperform deep learning on
+  tabular data?*

@@ -11,22 +11,28 @@ and the evaluation **honestly and at scale**, not on chasing an unrealistic scor
 
 ## What the pipeline does
 
-1. **Scale.** CHARTEVENTS is ~330M rows / 4.2 GB compressed. We never download it. Cohort
-   selection, first-24h filtering, error/range cleaning, CareVue↔MetaVision ITEMID
-   harmonization and per-concept aggregation are all pushed into **BigQuery SQL**
-   ([`src/data/sql.py`](src/data/sql.py)); only a compact aggregated table (one row per
-   ICU stay × concept) is downloaded.
+1. **Scale.** CHARTEVENTS (~330M rows / 4.2 GB) and LABEVENTS (~27M rows) are never
+   downloaded. Cohort selection, first-24h filtering, error/range cleaning, CareVue↔MetaVision
+   ITEMID harmonization and per-concept aggregation are all pushed into **BigQuery SQL**
+   ([`src/data/sql.py`](src/data/sql.py)); only compact aggregated tables (one row per
+   ICU stay × concept) are downloaded.
 2. **Leak-free features.** Only first-24h data feeds the model; measurement counts are
    window-capped (severity proxy, not a stay-length proxy); age is clipped to 90 to undo
    MIMIC's >89y / ~300y DOB shift; imputation is fit inside CV folds.
    ([`src/features/engineering.py`](src/features/engineering.py))
-3. **Honest validation.** Train/test split is **grouped by `SUBJECT_ID`** (no patient in
+3. **LABEVENTS ablation.** Every model is trained **without** and **with** the lab feature
+   block (renal/electrolyte/perfusion/haematology/coagulation panels, ~20 concepts via
+   [`src/data/lab_concepts.py`](src/data/lab_concepts.py)) on identical patients/folds, so the
+   report quantifies exactly what labs add. Labs join on `HADM_ID` (LABEVENTS has no
+   `ICUSTAY_ID`) and are time-windowed against the ICU `INTIME`; their 'abnormal' FLAG is kept,
+   not filtered.
+4. **Honest validation.** Train/test split is **grouped by `SUBJECT_ID`** (no patient in
    both sides; [`src/data/splits.py`](src/data/splits.py)). Models are compared with
    **GroupKFold** CV against trivial baselines, and **both** framings are reported:
    - **regression** — predict LOS in days (MAE / RMSE / R²),
    - **classification** — short (<3d) / medium (3–7d) / long (>7d), with accuracy, macro-F1,
      quadratic-weighted Cohen's κ and one-vs-rest AUROC.
-4. **Profiling.** Every phase is timed; the notebook prints a per-phase table and total
+5. **Profiling.** Every phase is timed; the notebook prints a per-phase table and total
    runtime ([`src/evaluation/profiling.py`](src/evaluation/profiling.py)).
 
 > **A realistic-expectations note:** continuous ICU-LOS is hard. Published R² is commonly
@@ -43,12 +49,13 @@ and the evaluation **honestly and at scale**, not on chasing an unrealistic scor
 src/
   config.py                 # all tunables (window, thresholds, CV, paths, GCP)
   data/
-    concepts.py             # CareVue/MetaVision ITEMID -> concept + valid ranges
-    sql.py                  # BigQuery query builders (the big-data core)
+    concepts.py             # CareVue/MetaVision chart ITEMID -> concept + valid ranges
+    lab_concepts.py         # LABEVENTS (D_LABITEMS) ITEMID -> lab concept + ranges
+    sql.py                  # BigQuery query builders, incl. lab aggregation (big-data core)
     loader.py               # BigQuery-first loader w/ parquet cache + synthetic fallback
-    synthetic.py            # clearly-labelled synthetic cohort (same shape as real)
+    synthetic.py            # clearly-labelled synthetic cohort (vitals + labs, same shape)
     splits.py               # grouped (by SUBJECT_ID) train/test split + GroupKFold
-  features/engineering.py   # long aggregates + demographics -> leak-free model matrix
+  features/engineering.py   # vital + lab aggregates + demographics -> leak-free matrix
   models/registry.py        # sklearn Pipelines for regression & classification
   evaluation/
     metrics.py              # regression + classification metrics, error-by-LOS-band
@@ -56,7 +63,7 @@ src/
     profiling.py            # execution-time profiler
   visualization/plots.py    # per-patient timeline, distributions, comparisons, etc.
 
-import_tables.py            # load patients/admissions/icustays/d_items/chartevents into BigQuery
+import_tables.py            # load patients/admissions/icustays/d_items/chartevents/d_labitems/labevents
 main.ipynb                  # the annotated, runnable orchestrator
 reports/REPORT.md           # methodology + results write-up (fill in numbers from a real run)
 requirements.txt

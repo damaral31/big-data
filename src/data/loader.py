@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
@@ -32,9 +32,10 @@ except Exception:  # pragma: no cover
 @dataclass
 class CohortData:
     cohort: pd.DataFrame
-    aggregates: pd.DataFrame
+    aggregates: pd.DataFrame          # CHARTEVENTS vitals (long)
     demographics: pd.DataFrame
-    source: str  # "BIGQUERY" or "SYNTHETIC"
+    source: str                       # "BIGQUERY" or "SYNTHETIC"
+    lab_aggregates: pd.DataFrame = field(default_factory=pd.DataFrame)  # LABEVENTS (long)
 
     @property
     def is_real(self) -> bool:
@@ -72,7 +73,8 @@ class BigQueryClient:
         return df
 
 
-def _try_bigquery(window_hours: int, limit: int | None) -> CohortData | None:
+def _try_bigquery(window_hours: int, limit: int | None,
+                  include_labs: bool) -> CohortData | None:
     if bigquery is None or cfg.GCP_CREDENTIALS_PATH is None:
         logger.info("BigQuery unavailable (no client or no credentials).")
         return None
@@ -82,7 +84,12 @@ def _try_bigquery(window_hours: int, limit: int | None) -> CohortData | None:
         aggregates = client.run(
             sql.window_aggregates_query(window_hours, limit), "agg")
         demographics = client.run(sql.demographics_query(limit), "demo")
-        return CohortData(cohort, aggregates, demographics, "BIGQUERY")
+        labs = pd.DataFrame()
+        if include_labs:
+            labs = client.run(
+                sql.window_lab_aggregates_query(window_hours, limit), "lab_agg")
+        return CohortData(cohort, aggregates, demographics, "BIGQUERY",
+                          lab_aggregates=labs)
     except Exception as exc:  # pragma: no cover - network/credential dependent
         logger.warning("BigQuery path failed (%s); falling back to synthetic.", exc)
         return None
@@ -92,18 +99,23 @@ def load_cohort(
     use_bigquery: bool = True,
     window_hours: int = cfg.PREDICTION_WINDOW_HOURS,
     limit: int | None = cfg.DEV_ICUSTAY_LIMIT,
+    include_labs: bool = cfg.INCLUDE_LABS,
 ) -> CohortData:
-    """Load cohort + first-window aggregates + demographics.
+    """Load cohort + first-window vital aggregates + demographics + lab aggregates.
 
     Tries BigQuery when ``use_bigquery`` and credentials exist; otherwise (or on
     any failure) returns a clearly-labelled synthetic cohort of the same shape.
+    ``include_labs`` controls whether the LABEVENTS aggregation is loaded.
     """
     if use_bigquery:
-        data = _try_bigquery(window_hours, limit)
+        data = _try_bigquery(window_hours, limit, include_labs)
         if data is not None:
             return data
 
     logger.warning("Using SYNTHETIC data -- results are for demonstration only.")
     n = limit or cfg.SYNTHETIC_N_STAYS
-    cohort, aggregates, demographics = synthetic.generate(n_stays=n)
-    return CohortData(cohort, aggregates, demographics, "SYNTHETIC")
+    cohort, aggregates, demographics, labs = synthetic.generate(n_stays=n)
+    if not include_labs:
+        labs = pd.DataFrame()
+    return CohortData(cohort, aggregates, demographics, "SYNTHETIC",
+                      lab_aggregates=labs)

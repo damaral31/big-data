@@ -22,14 +22,67 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 import requests
 from google.cloud import bigquery, storage
+
+try:
+    from tqdm import tqdm
+except ImportError:  # tqdm is optional; we fall back to periodic prints
+    tqdm = None
+
+
+class _ProgressReader:
+    """File-like wrapper that reports bytes as a stream is read (for uploads).
+
+    ``google-cloud-storage`` reads from the file object in chunks while uploading;
+    we forward ``read`` and tick a tqdm bar (or print every ~50 MB if tqdm is
+    absent). Total size comes from the HTTP ``Content-Length`` header.
+    """
+
+    def __init__(self, raw, total: int | None, desc: str):
+        self._raw = raw
+        self._total = total
+        self._seen = 0
+        self._last = 0
+        self._bar = (tqdm(total=total, unit="B", unit_scale=True, unit_divisor=1024,
+                          desc=desc, leave=False) if tqdm else None)
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._raw.read(size)
+        self._seen += len(chunk)
+        if self._bar is not None:
+            self._bar.update(len(chunk))
+        elif self._seen - self._last >= 50 * 1024 * 1024:  # every ~50 MB
+            self._last = self._seen
+            mb = self._seen / 1e6
+            pct = f" ({100 * self._seen / self._total:.0f}%)" if self._total else ""
+            tot = f" / {self._total / 1e6:.0f} MB" if self._total else ""
+            print(f"      uploaded {mb:.0f} MB{tot}{pct}", flush=True)
+        return chunk
+
+    def close(self):
+        if self._bar is not None:
+            self._bar.close()
 
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "big-data-497416")
 MIMIC_DATASET = os.environ.get("MIMIC_DATASET", "mimic_prod")
 BUCKET_NAME = os.environ.get("MIMIC_BUCKET", "big-data-visty-up")
 BASE_URL = "https://www.dcc.fc.up.pt/~ines/MIMIC-III"
+
+# Point the clients at a service-account key if one isn't already configured via
+# GOOGLE_APPLICATION_CREDENTIALS (mirrors src/config.py credential discovery).
+if not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+    for _cand in ("./gcp_key.json", os.path.join(os.path.dirname(__file__), "gcp_key.json"),
+                  os.path.join(os.path.expanduser("~"), "gcp_key.json")):
+        if os.path.exists(_cand):
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.abspath(_cand)
+            print(f"Using credentials: {os.environ['GOOGLE_APPLICATION_CREDENTIALS']}")
+            break
+    else:
+        print("WARNING: no gcp_key.json found and GOOGLE_APPLICATION_CREDENTIALS unset; "
+              "BigQuery auth will fail. Place gcp_key.json at the project root.")
 
 bq = bigquery.Client(project=GCP_PROJECT_ID)
 gcs = storage.Client(project=GCP_PROJECT_ID)
@@ -74,9 +127,19 @@ SCHEMAS: dict[str, list] = {
         S("VALUENUM", FLT, NUL), S("VALUEUOM", STR, NUL), S("WARNING", INT, NUL),
         S("ERROR", INT, NUL), S("RESULTSTATUS", STR, NUL), S("STOPPED", STR, NUL),
     ],
+    "d_labitems": [
+        S("ROW_ID", INT, REQ), S("ITEMID", INT, REQ), S("LABEL", STR, NUL),
+        S("FLUID", STR, NUL), S("CATEGORY", STR, NUL), S("LOINC_CODE", STR, NUL),
+    ],
+    "labevents": [
+        S("ROW_ID", INT, REQ), S("SUBJECT_ID", INT, REQ), S("HADM_ID", INT, NUL),
+        S("ITEMID", INT, NUL), S("CHARTTIME", TS, NUL), S("VALUE", STR, NUL),
+        S("VALUENUM", FLT, NUL), S("VALUEUOM", STR, NUL), S("FLAG", STR, NUL),
+    ],
 }
 
-LOAD_ORDER = ["patients", "admissions", "icustays", "d_items", "chartevents"]
+LOAD_ORDER = ["patients", "admissions", "icustays", "d_items", "chartevents",
+              "d_labitems", "labevents"]
 
 
 def stream_to_gcs(table: str) -> str:
@@ -86,15 +149,22 @@ def stream_to_gcs(table: str) -> str:
         print(f"  · gs://{BUCKET_NAME}/{blob_name} already present, reusing")
         return f"gs://{BUCKET_NAME}/{blob_name}"
     url = f"{BASE_URL}/{blob_name}"
-    print(f"  ↳ streaming {url} -> gs://{BUCKET_NAME}/{blob_name}")
+    print(f"  > streaming {url} -> gs://{BUCKET_NAME}/{blob_name}")
     with requests.get(url, stream=True, timeout=600) as r:
         r.raise_for_status()
-        blob.upload_from_file(r.raw, content_type="application/gzip")
+        total = int(r.headers.get("Content-Length", 0)) or None
+        r.raw.decode_content = False           # upload the raw .gz bytes as-is
+        reader = _ProgressReader(r.raw, total, f"  upload {blob_name}")
+        try:
+            blob.upload_from_file(reader, content_type="application/gzip")
+        finally:
+            reader.close()
     return f"gs://{BUCKET_NAME}/{blob_name}"
 
 
-def load_table(table: str) -> None:
-    print(f"[{table}]")
+def load_table(table: str, idx: int = 0, n_tables: int = 0) -> None:
+    tag = f"[{idx}/{n_tables}] {table}" if n_tables else f"[{table}]"
+    print(tag)
     uri = stream_to_gcs(table)
     table_id = f"{GCP_PROJECT_ID}.{MIMIC_DATASET}.{table}"
     job_config = bigquery.LoadJobConfig(
@@ -106,18 +176,22 @@ def load_table(table: str) -> None:
         max_bad_records=100,  # tolerate a handful of malformed rows in the mirror
     )
     job = bq.load_table_from_uri(uri, table_id, job_config=job_config)
-    job.result()
+    start = time.time()
+    while not job.done():                      # poll so the user sees it is alive
+        print(f"\r  indexing in BigQuery... {time.time() - start:4.0f}s", end="", flush=True)
+        time.sleep(2)
+    job.result()                               # surface any load error
     n = bq.get_table(table_id).num_rows
-    print(f"  ✓ {table_id}: {n:,} rows\n")
+    print(f"\r  OK {table_id}: {n:,} rows  ({time.time() - start:.0f}s)        \n")
 
 
 def main(tables: list[str]) -> None:
     bq.create_dataset(MIMIC_DATASET, exists_ok=True)
-    for t in tables:
-        if t not in SCHEMAS:
-            print(f"!! unknown table '{t}', skipping")
-            continue
-        load_table(t)
+    valid = [t for t in tables if t in SCHEMAS]
+    for bad in [t for t in tables if t not in SCHEMAS]:
+        print(f"!! unknown table '{bad}', skipping")
+    for i, t in enumerate(valid, 1):
+        load_table(t, i, len(valid))
     print("Done.")
 
 

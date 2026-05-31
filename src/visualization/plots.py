@@ -107,6 +107,116 @@ def confusion(cm: np.ndarray, labels):
     return fig
 
 
+def variance_scree(explained: np.ndarray, top: int = 10):
+    n = min(top, len(explained))
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(range(1, n + 1), explained[:n] * 100, color="steelblue", alpha=0.85)
+    ax.plot(range(1, n + 1), np.cumsum(explained[:n]) * 100, "o-", color="firebrick",
+            label="cumulative")
+    ax.set(xlabel="principal component", ylabel="variance explained (%)",
+           title="PCA scree")
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def embedding_scatter(coords, color_values, title: str, cbar_label: str = "LOS (days)",
+                      categorical: bool = False):
+    """2-D scatter (PCA or t-SNE) coloured by a value (LOS) or a category."""
+    fig, ax = plt.subplots(figsize=(7.5, 6))
+    if categorical:
+        cats = pd.Series(color_values).astype("category")
+        for c in cats.cat.categories:
+            m = cats.values == c
+            ax.scatter(coords[m, 0], coords[m, 1], s=10, alpha=0.5, label=str(c))
+        ax.legend(title=cbar_label, fontsize=8)
+    else:
+        sc = ax.scatter(coords[:, 0], coords[:, 1], c=np.clip(color_values, 0, 30),
+                        s=10, alpha=0.5, cmap="viridis")
+        fig.colorbar(sc, ax=ax, label=cbar_label)
+    ax.set(title=title, xlabel="dim 1", ylabel="dim 2")
+    fig.tight_layout()
+    return fig
+
+
+def silhouette_plot(k_scores: dict):
+    ks, sc = list(k_scores), list(k_scores.values())
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(ks, sc, "o-", color="slateblue")
+    best = max(k_scores, key=k_scores.get)
+    ax.axvline(best, color="firebrick", ls="--", label=f"best k={best}")
+    ax.set(xlabel="number of clusters (k)", ylabel="mean silhouette",
+           title="KMeans silhouette vs k")
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def feature_distributions_by_class(X: pd.DataFrame, y_clf: pd.Series,
+                                   features: list, order=("short", "medium", "long")):
+    """Small-multiples violin/box of the top features, split by LOS bucket."""
+    feats = [f for f in features if f in X.columns][:9]
+    ncol = 3
+    nrow = int(np.ceil(len(feats) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.2 * ncol, 3.2 * nrow))
+    axes = np.atleast_1d(axes).ravel()
+    df = X.copy()
+    df["__bucket"] = pd.Categorical(y_clf.values, categories=list(order), ordered=True)
+    for ax, f in zip(axes, feats):
+        data = [df.loc[df["__bucket"] == b, f].dropna() for b in order]
+        ax.boxplot(data, labels=list(order), showfliers=False)
+        ax.set_title(f, fontsize=9)
+        ax.tick_params(labelsize=8)
+    for ax in axes[len(feats):]:
+        ax.axis("off")
+    fig.suptitle("Distribution of top features by LOS bucket", fontweight="bold")
+    fig.tight_layout()
+    return fig
+
+
+def patient_vs_population(timeline: pd.DataFrame, concept: str,
+                          pop_mean: float, pop_std: float, icustay_id: int):
+    """One patient's trajectory for a concept vs the cohort's typical band.
+
+    Line = the patient's measured values over the first day; shaded area = the
+    cohort mean +/- 1 SD of that concept (so you can see if the patient runs
+    high/low/unstable relative to the population).
+    """
+    g = timeline[timeline["concept"] == concept].sort_values("day_fraction")
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    ax.axhspan(pop_mean - pop_std, pop_mean + pop_std, color="steelblue", alpha=0.15,
+               label="cohort mean +/- 1 SD")
+    ax.axhline(pop_mean, color="steelblue", ls="--", lw=1, label="cohort mean")
+    ax.plot(g["day_fraction"], g["value"], "o-", color="firebrick", ms=4,
+            label=f"patient {icustay_id}")
+    ax.set(xlabel="time since ICU admission (days)", ylabel=concept,
+           title=f"{concept}: patient trajectory vs cohort")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def missingness_bar(missing_fraction: pd.Series, top: int = 30):
+    s = missing_fraction.sort_values(ascending=False).head(top)
+    fig, ax = plt.subplots(figsize=(9, 0.32 * len(s) + 1.5))
+    ax.barh(s.index, s.values * 100, color="darkorange", alpha=0.85)
+    ax.invert_yaxis()
+    ax.set(xlabel="% missing", title=f"Missingness of top-{top} features")
+    fig.tight_layout()
+    return fig
+
+
+def feature_category_bar(category_counts: pd.Series):
+    fig, ax = plt.subplots(figsize=(8, 0.5 * len(category_counts) + 1.5))
+    ax.barh(category_counts.index, category_counts.values, color="seagreen", alpha=0.85)
+    ax.invert_yaxis()
+    for i, v in enumerate(category_counts.values):
+        ax.text(v, i, f" {v}", va="center", fontsize=9)
+    ax.set(xlabel="number of features", title="Feature inventory by category")
+    fig.tight_layout()
+    return fig
+
+
 def profiling(profile_df: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(9, 0.5 * len(profile_df) + 1.5))
     ax.barh(profile_df["phase"], profile_df["seconds"], color="slateblue",

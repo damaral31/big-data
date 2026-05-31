@@ -13,18 +13,19 @@ so there is a single source of truth for cohort rules and itemid mappings.
 from __future__ import annotations
 
 from .. import config as cfg
-from .concepts import CONCEPT_ITEMIDS, CONCEPT_VALID_RANGES
+from . import concepts as vital_concepts
+from . import lab_concepts
 
 
-def _concept_map_cte() -> str:
+def _concept_map_cte(itemid_map: dict, ranges: dict) -> str:
     """Build an inline (itemid -> concept, valid-range) lookup table.
 
     Emitted as ``UNNEST([STRUCT(...)])`` so no extra table needs to exist in
-    BigQuery and the mapping always matches :mod:`src.data.concepts`.
+    BigQuery and the mapping always matches the Python concept definitions.
     """
     rows = []
-    for concept, itemids in CONCEPT_ITEMIDS.items():
-        lo, hi = CONCEPT_VALID_RANGES[concept]
+    for concept, itemids in itemid_map.items():
+        lo, hi = ranges[concept]
         for itemid in itemids:
             rows.append(
                 f"STRUCT({itemid} AS itemid, '{concept}' AS concept, "
@@ -74,9 +75,11 @@ def window_aggregates_query(
       * valuenum BETWEEN concept lo/hi          -- drop impossible values
     """
     cohort = cohort_query(limit=limit)
+    cte = _concept_map_cte(vital_concepts.CONCEPT_ITEMIDS,
+                           vital_concepts.CONCEPT_VALID_RANGES)
     return f"""
 WITH concept_map AS (
-    {_concept_map_cte()}
+    {cte}
 ),
 cohort AS (
     {cohort}
@@ -104,6 +107,56 @@ SELECT
     MAX(valuenum)   AS max,
     STDDEV(valuenum) AS std
 FROM events
+GROUP BY icustay_id, concept
+""".strip()
+
+
+def window_lab_aggregates_query(
+    window_hours: int = cfg.PREDICTION_WINDOW_HOURS,
+    limit: int | None = None,
+) -> str:
+    """Per-(icustay, lab concept) aggregates over the FIRST ``window_hours``.
+
+    LABEVENTS has **no ICUSTAY_ID**, so we join on HADM_ID and time-window each
+    lab against the ICU INTIME. Because ICU stays within a hospital admission are
+    sequential, a lab falls into at most one stay's window.
+
+    Leakage controls mirror the chart query (window + value-range), but there is
+    **no error filter** -- LABEVENTS has only a clinical 'abnormal' FLAG, which we
+    deliberately keep (abnormal labs are exactly the informative ones).
+    """
+    cohort = cohort_query(limit=limit)
+    cte = _concept_map_cte(lab_concepts.CONCEPT_ITEMIDS,
+                           lab_concepts.CONCEPT_VALID_RANGES)
+    return f"""
+WITH lab_map AS (
+    {cte}
+),
+cohort AS (
+    {cohort}
+),
+lab_events AS (
+    SELECT
+        co.icustay_id,
+        m.concept,
+        l.valuenum
+    FROM `{cfg.LABEVENTS_TABLE}` l
+    JOIN cohort co   ON l.hadm_id = co.hadm_id
+    JOIN lab_map m   ON l.itemid  = m.itemid
+    WHERE l.valuenum IS NOT NULL
+      AND l.charttime >= co.intime
+      AND l.charttime <  TIMESTAMP_ADD(co.intime, INTERVAL {int(window_hours)} HOUR)
+      AND l.valuenum BETWEEN m.lo AND m.hi
+)
+SELECT
+    icustay_id,
+    concept,
+    COUNT(*)        AS n,
+    AVG(valuenum)   AS mean,
+    MIN(valuenum)   AS min,
+    MAX(valuenum)   AS max,
+    STDDEV(valuenum) AS std
+FROM lab_events
 GROUP BY icustay_id, concept
 """.strip()
 
@@ -147,9 +200,11 @@ def patient_timeline_query(icustay_id: int, window_hours: int | None = None) -> 
             f"  AND c.charttime < TIMESTAMP_ADD(i.intime, "
             f"INTERVAL {int(window_hours)} HOUR)\n"
         )
+    cte = _concept_map_cte(vital_concepts.CONCEPT_ITEMIDS,
+                           vital_concepts.CONCEPT_VALID_RANGES)
     return f"""
 WITH concept_map AS (
-    {_concept_map_cte()}
+    {cte}
 )
 SELECT
     c.charttime,

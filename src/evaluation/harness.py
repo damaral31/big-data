@@ -71,6 +71,28 @@ def cross_validate_models(models, X, y, groups, task: str,
     return pd.DataFrame(rows).T.sort_values(sort_key, ascending=ascending)
 
 
+def ablation_table(build_models, X_base, X_labs, y, groups, task: str):
+    """Compare a model set on the same rows WITHOUT vs WITH the LABEVENTS columns.
+
+    ``build_models`` is a zero-arg factory (e.g. ``registry.build_regressors``) so
+    each feature set gets fresh, unfitted pipelines. Returns
+    ``(delta_df, base_cv, labs_cv)`` where ``delta_df`` has the headline metric for
+    each model in both settings plus the improvement.
+    """
+    base_cv = cross_validate_models(build_models(), X_base, y, groups, task)
+    labs_cv = cross_validate_models(build_models(), X_labs, y, groups, task)
+    headline = "MAE_mean" if task == "regression" else "kappa_quadratic_mean"
+    # for MAE lower is better -> improvement = base - labs; else labs - base
+    better = (base_cv[headline] - labs_cv[headline]) if task == "regression" \
+        else (labs_cv[headline] - base_cv[headline])
+    delta = pd.DataFrame({
+        f"{headline}_no_labs": base_cv[headline],
+        f"{headline}_with_labs": labs_cv[headline],
+        "improvement": better,
+    }).sort_values("improvement", ascending=False)
+    return delta, base_cv, labs_cv
+
+
 def holdout_fit_predict(model, X_train, y_train, X_test, want_proba=False):
     """Fit on train, predict on test; return (y_pred, y_proba_or_None, seconds)."""
     t0 = time.perf_counter()

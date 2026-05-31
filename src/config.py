@@ -46,6 +46,8 @@ D_ITEMS_TABLE = table("d_items")
 ADMISSIONS_TABLE = table("admissions")
 ICUSTAYS_TABLE = table("icustays")
 PATIENTS_TABLE = table("patients")
+LABEVENTS_TABLE = table("labevents")
+D_LABITEMS_TABLE = table("d_labitems")
 
 # --------------------------------------------------------------------------- #
 # Cohort / target definition
@@ -68,7 +70,11 @@ LOS_CLASS_LABELS = ("short", "medium", "long")
 # Per-concept aggregates kept from the first-window measurements.
 AGG_FUNCS = ("mean", "min", "max", "std", "count")
 # Drop engineered columns missing in more than this fraction of stays.
+# Labs are sampled less often than vitals, so we allow a higher missing rate
+# for lab columns before dropping them.
 MAX_MISSING_FRACTION = 0.60
+MAX_MISSING_FRACTION_LABS = 0.80
+INCLUDE_LABS = True               # master switch for the LABEVENTS feature block
 AGE_CAP = 90.0                    # MIMIC shifts DOB of >89y patients ~300y; cap it.
 
 # --------------------------------------------------------------------------- #

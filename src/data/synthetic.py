@@ -18,6 +18,7 @@ import pandas as pd
 
 from .. import config as cfg
 from .concepts import CONCEPT_VALID_RANGES
+from .lab_concepts import CONCEPT_VALID_RANGES as LAB_VALID_RANGES
 
 # Probability that a given concept was charted at all for a stay (mimics the
 # sparse, ragged reality of CHARTEVENTS: not every patient gets every vital).
@@ -38,6 +39,27 @@ _CONCEPT_SEVERITY = {
     "tidal_volume": (450, -20),
 }
 
+# Lab presence (labs are sampled less universally than vitals) and how strongly
+# a second latent factor -- "organ dysfunction" -- shifts each.  organ is only
+# partly correlated with the vitals-driven severity, so labs carry information
+# the vitals alone do not -> the with-labs model genuinely improves.
+_LAB_PRESENCE = {
+    "creatinine": 0.92, "bun": 0.90, "sodium": 0.92, "potassium": 0.92,
+    "chloride": 0.85, "bicarbonate": 0.85, "anion_gap": 0.70, "glucose": 0.88,
+    "hemoglobin": 0.90, "hematocrit": 0.90, "wbc": 0.88, "platelets": 0.88,
+    "lactate": 0.45, "bilirubin": 0.55, "inr": 0.60, "ptt": 0.55,
+    "albumin": 0.45, "calcium": 0.80, "magnesium": 0.78, "ph": 0.40,
+}
+_LAB_ORGAN = {  # concept: (healthy_mean, organ_slope)
+    "creatinine": (1.0, 0.9), "bun": (18, 9), "sodium": (139, -1.5),
+    "potassium": (4.1, 0.3), "chloride": (104, -2), "bicarbonate": (24, -2.2),
+    "anion_gap": (12, 2.0), "glucose": (128, 24), "hemoglobin": (12.2, -1.2),
+    "hematocrit": (36, -3.5), "wbc": (9, 4.5), "platelets": (235, -42),
+    "lactate": (1.6, 1.7), "bilirubin": (0.8, 0.9), "inr": (1.1, 0.5),
+    "ptt": (32, 8), "albumin": (3.6, -0.5), "calcium": (8.8, -0.4),
+    "magnesium": (2.0, 0.1), "ph": (7.40, -0.05),
+}
+
 
 def generate(n_stays: int = cfg.SYNTHETIC_N_STAYS, seed: int = cfg.RANDOM_STATE):
     """Return ``(cohort_df, aggregates_long_df, demographics_df)`` -- synthetic."""
@@ -49,8 +71,12 @@ def generate(n_stays: int = cfg.SYNTHETIC_N_STAYS, seed: int = cfg.RANDOM_STATE)
     icustay_ids = np.arange(200_000, 200_000 + n_stays)
     hadm_ids = 100_000 + rng.integers(0, n_subjects, size=n_stays)
 
-    # --- latent severity drives both LOS and the vitals --------------------- #
+    # --- two latent factors ------------------------------------------------- #
+    # severity drives the vitals + LOS; organ (renal/metabolic dysfunction)
+    # drives the labs + LOS and is only partly correlated with severity, so labs
+    # add predictive value beyond the vitals.
     severity = rng.normal(0, 1, size=n_stays)
+    organ = 0.55 * severity + 0.83 * rng.normal(0, 1, size=n_stays)
 
     # demographics
     age = np.clip(rng.normal(64, 17, size=n_stays), 18, 91)
@@ -74,9 +100,9 @@ def generate(n_stays: int = cfg.SYNTHETIC_N_STAYS, seed: int = cfg.RANDOM_STATE)
     )
     age_effect = 0.004 * (np.clip(age, 18, 91) - 64)
 
-    # right-skewed LOS (log-normal), correlated with severity -> realistic, modest
-    log_los = 1.0 + 0.45 * severity + adm_effect + age_effect \
-        + rng.normal(0, 0.55, size=n_stays)
+    # right-skewed LOS (log-normal): vitals-severity + organ-dysfunction + admin
+    log_los = 1.0 + 0.38 * severity + 0.22 * organ + adm_effect + age_effect \
+        + rng.normal(0, 0.52, size=n_stays)
     los_days = np.clip(np.exp(log_los), cfg.MIN_LOS_HOURS / 24.0, cfg.MAX_LOS_DAYS)
 
     cohort = pd.DataFrame({
@@ -122,7 +148,30 @@ def generate(n_stays: int = cfg.SYNTHETIC_N_STAYS, seed: int = cfg.RANDOM_STATE)
     aggregates = pd.DataFrame(
         rows, columns=["icustay_id", "concept", "n", "mean", "min", "max", "std"]
     )
-    return cohort, aggregates, demographics
+
+    # --- per-lab first-window aggregates (long format) ---------------------- #
+    lab_rows = []
+    for i in range(n_stays):
+        o = organ[i]
+        n_lab_base = max(1.0, 2.0 + 1.4 * o)  # labs drawn far less often than vitals
+        for concept, present_p in _LAB_PRESENCE.items():
+            if rng.random() > present_p:
+                continue
+            lo, hi = LAB_VALID_RANGES[concept]
+            base, slope = _LAB_ORGAN[concept]
+            mean = base + slope * o + rng.normal(0, abs(slope) * 0.45 + 1e-2)
+            mean = float(np.clip(mean, lo, hi))
+            spread = abs(rng.normal(0, abs(slope) * 0.5 + 1e-2)) + 1e-3
+            vmin = float(np.clip(mean - spread, lo, hi))
+            vmax = float(np.clip(mean + spread, lo, hi))
+            n = int(max(1, rng.poisson(n_lab_base)))
+            lab_rows.append((icustay_ids[i], concept, n, mean, vmin, vmax,
+                             spread / 2.0))
+
+    lab_aggregates = pd.DataFrame(
+        lab_rows, columns=["icustay_id", "concept", "n", "mean", "min", "max", "std"]
+    )
+    return cohort, aggregates, demographics, lab_aggregates
 
 
 def patient_timeline(icustay_id: int = 200_000, window_hours: int = 48,

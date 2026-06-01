@@ -13,10 +13,14 @@ marks several columns NOT NULL, but the public CSV mirror contains rows that
 violate a few of those (e.g. ADMISSION_LOCATION, ICUSTAY_ID in CHARTEVENTS),
 which makes a strict load fail. Keys stay REQUIRED.
 
+Tables already present in BigQuery (with rows) are skipped; pass --force to
+reload them.
+
 Usage:
     export GCP_PROJECT_ID=...   GOOGLE_APPLICATION_CREDENTIALS=./gcp_key.json
-    python import_tables.py                  # load everything
+    python import_tables.py                  # load everything (skip what exists)
     python import_tables.py icustays d_items # load a subset
+    python import_tables.py --force          # reload everything, even if present
 """
 from __future__ import annotations
 
@@ -61,6 +65,12 @@ class _ProgressReader:
             tot = f" / {self._total / 1e6:.0f} MB" if self._total else ""
             print(f"      uploaded {mb:.0f} MB{tot}{pct}", flush=True)
         return chunk
+
+    def tell(self) -> int:
+        return self._seen
+
+    def readable(self) -> bool:
+        return True
 
     def close(self):
         if self._bar is not None:
@@ -162,11 +172,24 @@ def stream_to_gcs(table: str) -> str:
     return f"gs://{BUCKET_NAME}/{blob_name}"
 
 
-def load_table(table: str, idx: int = 0, n_tables: int = 0) -> None:
+def bq_row_count(table_id: str) -> int | None:
+    """Return the table's row count, or None if it doesn't exist yet."""
+    try:
+        return bq.get_table(table_id).num_rows
+    except Exception:
+        return None
+
+
+def load_table(table: str, idx: int = 0, n_tables: int = 0, force: bool = False) -> None:
     tag = f"[{idx}/{n_tables}] {table}" if n_tables else f"[{table}]"
     print(tag)
-    uri = stream_to_gcs(table)
     table_id = f"{GCP_PROJECT_ID}.{MIMIC_DATASET}.{table}"
+    if not force:
+        existing = bq_row_count(table_id)
+        if existing:
+            print(f"  · already in BigQuery ({existing:,} rows), skipping (use --force to reload)\n")
+            return
+    uri = stream_to_gcs(table)
     job_config = bigquery.LoadJobConfig(
         schema=SCHEMAS[table],
         skip_leading_rows=1,
@@ -185,16 +208,18 @@ def load_table(table: str, idx: int = 0, n_tables: int = 0) -> None:
     print(f"\r  OK {table_id}: {n:,} rows  ({time.time() - start:.0f}s)        \n")
 
 
-def main(tables: list[str]) -> None:
+def main(tables: list[str], force: bool = False) -> None:
     bq.create_dataset(MIMIC_DATASET, exists_ok=True)
     valid = [t for t in tables if t in SCHEMAS]
     for bad in [t for t in tables if t not in SCHEMAS]:
         print(f"!! unknown table '{bad}', skipping")
     for i, t in enumerate(valid, 1):
-        load_table(t, i, len(valid))
+        load_table(t, i, len(valid), force=force)
     print("Done.")
 
 
 if __name__ == "__main__":
-    requested = [t.lower() for t in sys.argv[1:]] or LOAD_ORDER
-    main(requested)
+    argv = [a.lower() for a in sys.argv[1:]]
+    force = any(a in ("--force", "-f") for a in argv)
+    requested = [a for a in argv if not a.startswith("-")] or LOAD_ORDER
+    main(requested, force=force)

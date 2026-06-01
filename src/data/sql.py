@@ -59,6 +59,21 @@ ORDER BY i.icustay_id{limit_sql}
 """.strip()
 
 
+def all_los_hours_query(limit: int | None = None) -> str:
+    """ICU LOS in HOURS for *all* stays (no MIN_LOS_HOURS filter).
+
+    Used only for the Phase-1 window-justification histogram, where we must see
+    the short stays that each candidate window would exclude.
+    """
+    limit_sql = f"\nLIMIT {int(limit)}" if limit else ""
+    return f"""
+SELECT TIMESTAMP_DIFF(i.outtime, i.intime, SECOND) / 3600.0 AS los_hours
+FROM `{cfg.ICUSTAYS_TABLE}` i
+WHERE i.outtime IS NOT NULL
+  AND TIMESTAMP_DIFF(i.outtime, i.intime, SECOND) / 86400.0 <= {cfg.MAX_LOS_DAYS}{limit_sql}
+""".strip()
+
+
 def window_aggregates_query(
     window_hours: int = cfg.PREDICTION_WINDOW_HOURS,
     limit: int | None = None,

@@ -108,7 +108,7 @@ def tune_regressor(X_train, y_train, groups_train, profiler=None):
     name, base, space = registry.tuned_regressor_search_space()
     search = RandomizedSearchCV(
         base, space, n_iter=cfg.HP_SEARCH_ITER, scoring="neg_mean_absolute_error",
-        cv=grouped_cv(), random_state=cfg.RANDOM_STATE, n_jobs=cfg.N_JOBS,
+        cv=grouped_cv(), random_state=cfg.RANDOM_STATE, n_jobs=1,
         error_score="raise",
     )
     t0 = time.perf_counter()

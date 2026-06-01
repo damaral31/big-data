@@ -83,7 +83,7 @@ AGE_CAP = 90.0                    # MIMIC shifts DOB of >89y patients ~300y; cap
 RANDOM_STATE = 42
 TEST_SIZE = 0.20                  # grouped hold-out by SUBJECT_ID
 CV_FOLDS = 5                      # GroupKFold for cross-validation
-HP_SEARCH_ITER = 20              # RandomizedSearchCV budget for the tuned model
+HP_SEARCH_ITER = 12              # RandomizedSearchCV budget for the tuned model
 N_JOBS = -1
 
 # --------------------------------------------------------------------------- #

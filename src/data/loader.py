@@ -95,6 +95,19 @@ def _try_bigquery(window_hours: int, limit: int | None,
         return None
 
 
+def load_all_los_hours(use_bigquery: bool = True,
+                       limit: int | None = None) -> pd.Series:
+    """Unfiltered ICU LOS in hours (for the Phase-1 window-justification plot)."""
+    if use_bigquery and bigquery is not None and cfg.GCP_CREDENTIALS_PATH is not None:
+        try:
+            client = BigQueryClient()
+            df = client.run(sql.all_los_hours_query(limit), "all_los_hours")
+            return df["los_hours"]
+        except Exception as exc:  # pragma: no cover
+            logger.warning("all_los_hours BigQuery failed (%s); using synthetic.", exc)
+    return synthetic.all_los_hours(limit or cfg.SYNTHETIC_N_STAYS)
+
+
 def load_cohort(
     use_bigquery: bool = True,
     window_hours: int = cfg.PREDICTION_WINDOW_HOURS,

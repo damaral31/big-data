@@ -40,6 +40,27 @@ def patient_timeline(events: pd.DataFrame, icustay_id: int):
     return fig
 
 
+def los_window_justification(y_hours, windows=(6, 24, 48, 72), clip_h: int = 168):
+    """Histogram of ICU LOS in hours with candidate prediction windows marked.
+
+    The mass to the LEFT of each line is the fraction of stays that would be
+    *excluded* by that window (they end before a full window of data exists).
+    Computed on the UNFILTERED stay durations so the exclusions are visible.
+    """
+    h = np.asarray(y_hours, float)
+    fig, ax = plt.subplots(figsize=(11, 4.5))
+    ax.hist(np.clip(h, 0, clip_h), bins=70, color="steelblue", edgecolor="black", alpha=0.8)
+    for w, c in zip(windows, ["#888888", "firebrick", "darkorange", "seagreen"]):
+        excl = float(np.mean(h < w)) * 100
+        ax.axvline(w, color=c, ls="--", lw=2, label=f"{w}h  (exclui {excl:.1f}%)")
+    ax.set(xlabel="duracao da estadia na UCI (horas, recortado a 168h)",
+           ylabel="numero de estadias",
+           title="Distribuicao da duracao das estadias e janelas candidatas")
+    ax.legend(title="janela candidata")
+    fig.tight_layout()
+    return fig
+
+
 def los_distribution(y_days: pd.Series):
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
     axes[0].hist(y_days, bins=60, color="steelblue", edgecolor="black", alpha=0.8)

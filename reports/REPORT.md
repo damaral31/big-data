@@ -1,10 +1,10 @@
-# Previsão do Tempo de Internamento em UCI a partir das Primeiras 24 Horas — MIMIC-III
+# Previsão do Tempo de Internamento em UCI a partir das Primeiras 24 Horas -- MIMIC-III
 ### Relatório segundo a metodologia CRISP-DM
 
 > Documento-fonte para o entregável em PDF; espelha o `main.ipynb`. Os valores entre
 > parêntesis `[..]` são preenchidos a partir de uma execução real sobre o BigQuery. Os números
-> de execuções com dados sintéticos **não** são resultados reais — servem apenas para validar o
-> *pipeline*. Metodologia: CRISP-DM (Wirth & Hipp, 2000) — as seis fases que se seguem.
+> de execuções com dados sintéticos **não** são resultados reais -- servem apenas para validar o
+> *pipeline*. Metodologia: CRISP-DM (Wirth & Hipp, 2000) -- as seis fases que se seguem.
 >
 > **Nota de utilização:** cada secção está escrita para ser colada na célula *markdown*
 > correspondente do notebook. Os títulos seguem as fases do CRISP-DM já presentes no `main.ipynb`.
@@ -17,7 +17,7 @@ Prevemos o **tempo de internamento (Length of Stay, LOS, em dias) numa Unidade d
 Intensivos (UCI)** usando apenas as **primeiras 24 horas** de cada estadia, a partir de sinais
 vitais (CHARTEVENTS), análises laboratoriais (LABEVENTS) e dados demográficos do MIMIC-III. O
 trabalho é tratado como um problema de *big data*: a tabela CHARTEVENTS tem ~330 milhões de
-linhas (4,2 GB comprimidos) e **nunca é descarregada para o disco local** — toda a filtragem e
+linhas (4,2 GB comprimidos) e **nunca é descarregada para o disco local** -- toda a filtragem e
 agregação pesada é empurrada para o BigQuery, regressando apenas uma tabela compacta de
 agregados. Reportamos duas formulações (regressão e classificação ordinal), controlamos
 rigorosamente a **fuga de dados (*data leakage*)** e avaliamos com validação cruzada agrupada por
@@ -27,9 +27,9 @@ frequentemente contaminada por fugas de dados para servir de *baseline* fiável.
 
 ---
 
-## Fase 1 — Compreensão do Problema (*Business Understanding*)
+## Fase 1 -- Compreensão do Problema (*Business Understanding*)
 
-**Objetivo.** Estimar o tempo de internamento em UCI **ao fim de 24 horas** — suficientemente
+**Objetivo.** Estimar o tempo de internamento em UCI **ao fim de 24 horas** -- suficientemente
 cedo para apoiar decisões de gestão de camas, alocação de pessoal e planeamento de transferência,
 mas tarde o bastante para existir um dia completo de dados.
 
@@ -46,19 +46,33 @@ existe um dia inteiro de vitais e labs, e ainda há tempo para agir. A coorte fi
 a estadias **ainda em curso às 24h** (`MIN_LOS_HOURS = 24`), com o LOS limitado a 60 dias para
 neutralizar estadias erróneas ou extremas.
 
+Para fundamentar empiricamente esta escolha, a Figura 1 mostra o **histograma da duração das
+estadias em horas** (recortado às primeiras 168h, onde se concentra a decisão). As linhas
+verticais marcam as janelas candidatas (6 / 24 / 48 / 72h): a massa de estadias **à esquerda** de
+cada linha é a fração que seria **excluída** por terminar antes da janela (não há um dia completo
+de dados para prever). A leitura confirma o compromisso: às **6h** quase não há exclusões mas
+também poucos labs já resultaram; às **24h** perde-se sobretudo a cauda das estadias muito curtas
+(em larga medida transferências rápidas, que nem chegam a precisar de previsão de duração),
+retendo a maior parte da coorte com um dia completo de dados; às **48/72h** a exclusão de estadias
+cresce acentuadamente e cada decisão é adiada mais um/dois dias, sem ganho proporcional de
+informação. A percentagem exata excluída por cada janela é anotada no gráfico (preencher a partir
+da execução real).
+
+![Figura 1 -- Distribuição da duração das estadias (horas) e janelas candidatas](figures/los_hours_windows.png)
+
 **Duas formulações (porquê ambas).** A regressão (prever dias) é o pedido literal, mas tem um R²
-intrinsecamente baixo — é um problema difícil. A classificação ordinal (curto <3 d / médio 3–7 d
+intrinsecamente baixo -- é um problema difícil. A classificação ordinal (curto <3 d / médio 3–7 d
 / longo >7 d) é a formulação mais robusta e mais comum na literatura, e produz *buckets*
 operacionalmente mais úteis. Reportamos as duas.
 
 **Categorias de atributos.** Vitais das primeiras 24h (hemodinâmica, respiração, neurologia),
 labs (função renal, eletrólitos, perfusão, hematologia, coagulação) e demografia/administrativos
-(idade, sexo, tipo de admissão, unidade) — exatamente as variáveis que um clínico tem disponíveis
+(idade, sexo, tipo de admissão, unidade) -- exatamente as variáveis que um clínico tem disponíveis
 à hora 24 e que a literatura associa a deterioração e a estadias prolongadas.
 
 ---
 
-## Fase 2 — Compreensão dos Dados (*Data Understanding*)
+## Fase 2 -- Compreensão dos Dados (*Data Understanding*)
 
 **Conjunto de dados (MIMIC-III v1.4).**
 
@@ -69,13 +83,13 @@ labs (função renal, eletrólitos, perfusão, hematologia, coagulação) e demo
 | ICUSTAYS / ADMISSIONS / PATIENTS | 61,5k / 59k / 46,5k | coorte, alvo, demografia |
 | D_ITEMS / D_LABITEMS | ~12,5k / ~750 | mapeamento ITEMID → conceito |
 
-**Inclusão do LABEVENTS — uma decisão a posteriori.** Importa ser transparente quanto à
+**Inclusão do LABEVENTS -- uma decisão a posteriori.** Importa ser transparente quanto à
 cronologia do trabalho: o *pipeline* foi inicialmente construído apenas em torno do CHARTEVENTS
 (sinais vitais), e a integração da tabela LABEVENTS (análises laboratoriais) foi uma **decisão
 tomada posteriormente**, já com a arquitetura montada. Esta ordem histórica explica várias opções
 de desenho que de outro modo poderiam parecer arbitrárias: (i) os atributos de laboratório são
 acrescentados por *left join* sobre a matriz de vitais, mantendo **exatamente o mesmo conjunto de
-estadias** — o que permite a ablação «sem labs vs. com labs» da Fase 4 ser rigorosamente
+estadias** -- o que permite a ablação «sem labs vs. com labs» da Fase 4 ser rigorosamente
 comparável (as mesmas linhas, apenas colunas a mais); (ii) os conceitos de laboratório levam o
 prefixo `lab_` para não colidirem com vitais homónimos (a glicose, por exemplo, existe nas duas
 tabelas); (iii) atribuímos aos labs um limiar de *missingness* mais tolerante, por serem medidos
@@ -83,7 +97,7 @@ com menos frequência do que os vitais. Em vez de dissimular esta sequência, to
 convertêmo-la numa mais-valia experimental: a ablação **quantifica honestamente quanto é que os
 labs acrescentam** ao modelo que já existia com vitais apenas.
 
-**Análise exploratória.** O LOS é fortemente assimétrico à direita (mediana [..] d, com uma cauda
+**Análise exploratória.** O LOS é fortemente enviesado à direita (mediana [..] d, com uma cauda
 longa e heterogénea); a classe "longo" é minoritária. Mostramos também as **séries temporais de
 eventos por doente** (o gráfico-exemplo do enunciado: X = fração do dia desde a admissão, Y =
 valor medido, cor = conceito) e uma vista de **doente vs. banda da população (média ± 1 DP)** que
@@ -93,11 +107,11 @@ revela se aquele doente corre alto/baixo/instável face à coorte.
 de UCI** usados em épocas diferentes no mesmo hospital: o **CareVue** (Philips, anterior a 2008),
 cujos ITEMIDs são < 220000, e o **MetaVision** (iMDsoft, a partir de 2008), com ITEMIDs ≥ 220000.
 Como cada sistema tinha o seu próprio dicionário de itens, o *mesmo* conceito clínico ficou
-registado sob **vários ITEMIDs distintos** — por exemplo, a **frequência cardíaca** é o item `211`
+registado sob **vários ITEMIDs distintos** -- por exemplo, a **frequência cardíaca** é o item `211`
 no CareVue mas `220045` no MetaVision; a pressão arterial sistólica tem meia dúzia de códigos
 repartidos entre os dois sistemas. Se agregássemos os ITEMIDs em bruto, cada código geraria a sua
 própria coluna e o resultado seria duplamente problemático: (i) obteríamos **colunas duplicadas e
-semivazias** — um doente do CareVue teria valor em `211` e *NaN* em `220045`, e vice-versa, pelo
+semivazias** -- um doente do CareVue teria valor em `211` e *NaN* em `220045`, e vice-versa, pelo
 que o modelo veria dois atributos sem perceber que são o mesmo; e (ii) a metade CareVue e a metade
 MetaVision da coorte tornar-se-iam, na prática, **dois conjuntos de dados disjuntos**,
 impossibilitando comparar doentes registados em sistemas diferentes. Por isso, **antes de
@@ -108,7 +122,7 @@ que `211` e `220045` alimentem a mesma coluna `heart_rate`.
 **De onde vêm estes agrupamentos (não foram inventados por nós).** Decidir que `211` e `220045`
 são "a mesma coisa" exige conhecimento de domínio sobre os dois dicionários do MIMIC. Não fizemos
 esse mapeamento de raiz: seguimos as **definições de conceito curadas pela comunidade** no
-repositório oficial `mimic-code` do MIT-LCP — o mesmo grupo que publica o MIMIC —, onde *scripts*
+repositório oficial `mimic-code` do MIT-LCP -- o mesmo grupo que publica o MIMIC --, onde *scripts*
 SQL revistos por pares listam explicitamente que ITEMIDs do CareVue e do MetaVision pertencem a
 cada conceito, p. ex. `HeartRate → (211, 220045)` e `SysBP → (51, 442, 455, 6701, 220179,
 220050)`. O nosso dicionário `CONCEPT_ITEMIDS` espelha esses agrupamentos, e os ITEMIDs dos labs em
@@ -123,14 +137,14 @@ que lhe atribuímos.
 
 **Missingness informativo.** A ausência de medições **não é aleatória**: decidir pedir um lactato
 ou um vital extra é, em si, um sinal clínico de preocupação. Por isso, além de imputar, adicionamos
-(Fase 3) um atributo 0/1 *foi-medido* por conceito, que captura a própria decisão de medir —
+(Fase 3) um atributo 0/1 *foi-medido* por conceito, que captura a própria decisão de medir --
 informação que a imputação apagaria.
 
 ---
 
-## Fase 3 — Preparação dos Dados (*Data Preparation*)
+## Fase 3 -- Preparação dos Dados (*Data Preparation*)
 
-**Controlos de fuga de dados — o que é escondido ou alterado.** Este é o ponto metodológico mais
+**Controlos de fuga de dados -- o que é escondido ou alterado.** Este é o ponto metodológico mais
 importante do trabalho (e, como discutimos na Fase 4, o que mais distingue a nossa abordagem da
 literatura mais fraca).
 
@@ -145,8 +159,8 @@ literatura mais fraca).
 
 **Nota sobre a idade (artefacto de anonimização).** A linha da idade merece um esclarecimento,
 porque a sua motivação é de **qualidade de dados** e não, em rigor, de fuga. Por exigências de
-anonimização — a norma norte-americana HIPAA trata qualquer idade acima dos 89 anos como
-identificador potencial —, o MIMIC-III **desloca deliberadamente a data de nascimento (`DOB`) dos
+anonimização -- a norma norte-americana HIPAA trata qualquer idade acima dos 89 anos como
+identificador potencial --, o MIMIC-III **desloca deliberadamente a data de nascimento (`DOB`) dos
 doentes com mais de 89 anos** para cerca de 300 anos antes da primeira admissão. Em consequência,
 ao calcular a idade como `ADMITTIME − DOB`, esses doentes surgem com idades absurdas de **~300
 anos**. Deixar estes valores em bruto distorceria as estatísticas de idade e prejudicaria os
@@ -159,25 +173,25 @@ dos restantes controlos, que esses sim visam impedir *leakage*.
 **Engenharia de atributos.** Agregados por (estadia, conceito): média/mín/máx/desvio-padrão/contagem;
 intensidade limitada à janela; demografia codificada; e os indicadores `*_measured`. A imputação e
 a normalização são feitas **dentro do *pipeline*** (ajustadas por *fold*), nunca sobre o conjunto
-todo — caso contrário, o conjunto de teste contaminaria o de treino. Construímos **duas matrizes
+todo -- caso contrário, o conjunto de teste contaminaria o de treino. Construímos **duas matrizes
 sobre exatamente as mesmas linhas** (sem labs / com labs) para uma ablação rigorosamente
 comparável.
 
 **Exploração não supervisionada (exploratória, *não* preditiva).** PCA (scree + projeção 2-D),
-t-SNE (apenas visualização — as distâncias no mapa não são fiáveis) e KMeans com *silhouette*
+t-SNE (apenas visualização -- as distâncias no mapa não são fiáveis) e KMeans com *silhouette*
 para escolher k. Expectativa honesta e confirmada: coortes clínicas agrupam-se fracamente
-(*silhouette* tipicamente < 0,3), e os *clusters* alinham-se apenas vagamente com o LOS — o que
+(*silhouette* tipicamente < 0,3), e os *clusters* alinham-se apenas vagamente com o LOS -- o que
 confirma que um modelo *supervisionado* é a ferramenta certa, e não uma segmentação.
 
 **Divisão treino/teste.** `GroupShuffleSplit` / `GroupKFold` sobre `SUBJECT_ID`: nenhum doente
 aparece simultaneamente no treino e no teste. Sem isto, o modelo memoriza idiossincrasias do
-doente e as métricas ficam otimistas — uma falha comum na literatura (ver Fase 4).
+doente e as métricas ficam otimistas -- uma falha comum na literatura (ver Fase 4).
 
 ---
 
-## Fase 4 — Modelação (*Modeling*)
+## Fase 4 -- Modelação (*Modeling*)
 
-### 4.1 Revisão crítica da literatura — porque não a usamos como *baseline*
+### 4.1 Revisão crítica da literatura -- porque não a usamos como *baseline*
 
 Esta secção é deliberadamente crítica. Levantámos os trabalhos mais citados sobre previsão de LOS
 em MIMIC e concluímos que a maioria **não serve como linha de base fiável**. Resumindo o estado
@@ -198,7 +212,7 @@ escolhido *a posteriori*, inviabilizando os dados:
 - *Prediction of Intensive Care Unit Length of Stay in the MIMIC-IV Dataset*
 - *Using Machine Learning Models to Predict the Length of Stay in a Hospital Setting*
 
-**Muitos usam grupos de tempo** (curto / médio / longo) — a formulação que também adotamos como
+**Muitos usam grupos de tempo** (curto / médio / longo) -- a formulação que também adotamos como
 segunda framing, por ser a mais robusta.
 
 **Problemas metodológicos transversais** que tornam estes trabalhos inadequados como *baseline*:
@@ -215,12 +229,12 @@ segunda framing, por ser a mais robusta.
    incomparáveis.
 4. **Limiares e desbalanceamento arbitrários.** Em classificação binária, o limiar (>3 d, >7 d…)
    e o balanceamento variam de artigo para artigo, e muitos reportam *accuracy*/AUROC sobre
-   classes desbalanceadas sem calibração nem curvas precision-recall — métricas facilmente
+   classes desbalanceadas sem calibração nem curvas precision-recall -- métricas facilmente
    enganadoras.
-5. **Desempenhos absurdos.** R² próximos de 0,9 ou *accuracy* >95% num problema que os trabalhos
+5. **Desempenhos absurdos.** R² próximos de 0,8 ou *accuracy* >95% num problema que os trabalhos
    rigorosos mostram ser difícil são, quase sempre, sintoma de fuga de dados, não de mérito.
 
-**Conclusão crítica — com uma ressalva.** Tomados em conjunto, estes trabalhos são demasiado
+**Conclusão crítica -- com uma ressalva.** Tomados em conjunto, estes trabalhos são demasiado
 heterogéneos e frequentemente contaminados para servirem de *baseline* quantitativa. **No
 entanto, seria injusto e incorreto descartá-los a todos por igual.** O *benchmark* de
 **Harutyunyan et al. (2019)** é a exceção rigorosa: define a coorte publicamente, controla fugas,
@@ -230,7 +244,7 @@ linha de base de referência (regressão linear MAD ≈ 116,4h ≈ 4,85 d; LSTM 
 
 ### 4.2 Linhas de base e SOTA proposto
 
-Ancoramos contra três níveis: (i) **baselines triviais** (média / classe maioritária) — um modelo
+Ancoramos contra três níveis: (i) **baselines triviais** (média / classe maioritária) -- um modelo
 tem de os bater, e um R² ≈ 0 destes confirma que o alvo não está a vazar; (ii) o **benchmark de
 Harutyunyan**; (iii) o nosso **SOTA proposto** para este cenário tabular: **árvores com *gradient
 boosting* (XGBoost, LightGBM)**, que igualam ou superam redes profundas em dados tabulares de
@@ -246,75 +260,117 @@ e com os atributos de laboratório, para quantificar o contributo dos labs de fo
 
 ---
 
-## Fase 5 — Avaliação (*Evaluation*)
+## Fase 5 -- Avaliação (*Evaluation*) -- protocolo
 
-| Formulação | Métrica | Sem labs | Com labs | Δ | Literatura |
-|---|---|---|---|---|---|
-| Regressão (afinado, hold-out) | MAE (d) | [..] | [..] | **[..]** | LSTM 3,92 |
-| Regressão | R² | [..] | [..] | **[..]** | ~0,04 |
-| Classificação (melhor) | *quadratic* κ | [..] | [..] | **[..]** | LSTM 0,43 |
-| Classificação | macro-AUROC | [..] | [..] | **[..]** | >7d 0,76 |
+Esta fase fixa **como** medimos o sucesso; os números propriamente ditos são apresentados na
+secção **Resultados**, deliberadamente colocada **depois** da descrição da implementação (Fase 6),
+para que o leitor compreenda primeiro *como* o sistema foi construído e só então veja o que
+produz.
 
-Os labs representaram **[..]%** da importância do modelo afinado (indicadores de missingness
-**[..]%**); o ganho concentra-se nos modelos de árvore (o modelo linear quase não beneficia — os
-labs acrescentam sinal não linear de disfunção orgânica). Analisamos as **distribuições dos
-atributos mais importantes por *bucket* de LOS** e a **importância de atributos**. A tabela de
-erro por banda revela o modo de falha universal: **as estadias longas são sistematicamente
-subestimadas** — coerente com a assimetria do alvo e a escassez de exemplos longos.
+**Métricas.** Para a regressão reportamos **MAE** (erro médio em dias -- a métrica clinicamente
+legível), **RMSE** (penaliza erros grandes), **R²** (variância explicada) e a **fração de
+previsões dentro de ±1 dia**. Para a classificação ordinal reportamos **accuracy**, **macro-F1**,
+o **kappa quadrático de Cohen** (recompensa erros «quase certos» na escala ordinal curto<médio<longo,
+sendo por isso a métrica-chave) e a **macro-AUROC** *one-vs-rest*.
+
+**Desenho da comparação.** (i) Validação cruzada `GroupKFold` por doente para a seleção de modelos,
+e um **conjunto de *hold-out* agrupado** para a estimativa final; (ii) cada modelo é avaliado
+**sem e com labs** sobre os mesmos *folds* (a ablação LABEVENTS); (iii) comparamos contra os
+*baselines* triviais (média/maioria) e contra o *benchmark* de Harutyunyan (Fase 4).
+
+**Análises de erro.** Além das métricas agregadas, examinamos a **importância dos atributos**, as
+**distribuições dos atributos mais importantes por *bucket* de LOS**, a **tabela de erro por banda
+de LOS** (onde o modelo falha) e a **matriz de confusão**.
 
 ---
 
-## Fase 6 — Implementação, Desempenho e *Big Data*
+## Fase 6 -- Implementação, Desempenho e *Big Data*
 
 Esta fase responde diretamente ao pedido do enunciado: *reportar o tempo total de execução, fazer
 profiling das fases de ML e discutir questões de desempenho.*
 
-### 6.1 BigQuery vs. PySpark — porque escolhemos BigQuery
+### 6.1 Porque implementámos com BigQuery (e não com PySpark)
 
-As tabelas do MIMIC são **relacionais e tipo-SQL** (chaves, tipos, junções por `HADM_ID` /
-`ICUSTAY_ID`). A carga de trabalho é *filtrar-depois-agregar* sobre duas tabelas grandes. Para
-este padrão, o BigQuery é a escolha natural:
+A carga de trabalho deste projeto é bem definida: **filtrar-depois-agregar** duas tabelas grandes e
+relacionais (CHARTEVENTS ~330 M, LABEVENTS ~27 M), já carregadas como tabelas SQL, devolvendo uma
+matriz compacta de agregados por (estadia, conceito). A tabela seguinte liga cada **necessidade
+concreta deste projeto** à **característica do BigQuery que a viabiliza** e à **característica do
+PySpark que o torna desadequado aqui**:
 
-- **Sem gestão de *cluster*.** O BigQuery é *serverless*; o PySpark exigiria provisionar e afinar
-  um *cluster* (Dataproc/EMR), gerir memória de executores, *partitioning* e *shuffles* — muito
-  mais *boilerplate* para o mesmo resultado.
-- **SQL declarativo vs. código imperativo.** A lógica de coorte, janela e agregação exprime-se
-  diretamente em SQL, num único local (`src/data/sql.py`), o que é mais legível e menos sujeito a
-  erros do que transformações encadeadas de *DataFrames* Spark.
-- **Quando o Spark ganharia.** Se os dados vivessem em ficheiros planos sem um *data warehouse*,
-  ou se precisássemos de transformações iterativas/personalizadas que não se exprimem bem em SQL,
-  o Spark seria a opção acertada — e a *mesma* decomposição map (*parse* + filtro + janela) /
-  reduce (agregar por estadia-conceito) aplicar-se-ia.
+| Necessidade do projeto | Característica do BigQuery que a viabiliza | Porque o PySpark fica aquém *aqui* |
+|---|---|---|
+| Varrer/filtrar/agregar centenas de milhões de linhas sem montar infraestrutura | **Serverless + autoescalável**: distribui o varrimento por milhares de *slots* automaticamente | Exige **provisionar e gerir um *cluster*** (Dataproc/EMR): dimensionar nós, memória de executores, *partitioning* e *shuffles* |
+| Trazer pouca informação para local (só agregados) | **Motor colunar Dremel com *aggregation pushdown***: o `GROUP BY` corre no servidor | Faria o mesmo, mas só depois de **ler os dados para o *cluster* Spark** -- passo extra e duplicação |
+| Exprimir coorte + janela de 24h + agregação de forma clara e à prova de erro | **SQL declarativo** num único ficheiro (`src/data/sql.py`) | **API imperativa de *DataFrames***: cadeias de transformações mais verbosas e fáceis de errar para esta lógica |
+| Iterar depressa (re-correr, ajustar janela, re-treinar) num projeto académico | ***Pay-per-byte* + *cache* de resultados** (§6.3): nada a correr entre iterações | **Custo/latência de um *cluster* ligado** mesmo parado, e arranque de sessão JVM/Spark a cada execução |
+| Não manter operações/infra (sem equipa de *ops*) | **Zero administração**: o Google gere o motor | Implica **manutenção do *cluster*** (versões, *tuning*, falhas de nós) |
 
-### 6.2 O BigQuery já faz *MapReduce* — não o reimplementámos de propósito
+**Características do BigQuery decisivas para a escolha**, em resumo: é *serverless* (sem *cluster*),
+**colunar** (varre só as colunas pedidas -- §6.4), executa **SQL declarativo**, faz **agregação do
+lado do servidor** (*pushdown*), cobra por **bytes processados** (sem custo de máquina parada) e
+**cacheia** resultados. Como os dados do MIMIC **já vivem como tabelas SQL** no *warehouse* (foram
+lá carregados por `import_tables.py`), o BigQuery é também o ponto de menor atrito -- não há que
+mover dados para um motor externo.
+
+**Quando o PySpark *seria* a escolha certa (honestidade).** Se os dados vivessem em ficheiros
+planos sem *data warehouse*, ou se precisássemos de transformações iterativas/personalizadas (ML
+distribuído, UDFs complexas) que não se exprimem bem em SQL, o Spark seria acertado -- e a *mesma*
+decomposição map (*parse* + filtro + janela) / reduce (agregar por estadia-conceito) aplicar-se-ia.
+
+### 6.2 O BigQuery já faz *MapReduce* -- não o reimplementámos de propósito
 
 A *engine* do BigQuery (Dremel) executa exatamente este trabalho como um plano distribuído de
 **estilo map-reduce**: o `WHERE` / `JOIN` é o *map* (corre em milhares de *shards* em paralelo) e
 o `GROUP BY ... AVG/MIN/MAX/COUNT` é o *reduce*. Empurramos esse cálculo para SQL e só algumas
 centenas de milhar de linhas agregadas saem do *warehouse*. **Escrever à mão um *job*
 Hadoop/Spark MapReduce reproduziria o que o BigQuery já faz**, com mais sobrecarga e mais lento de
-desenvolver — seria *over-engineering*. O MapReduce está, portanto, presente conceptualmente e
+desenvolver -- seria *over-engineering*. O MapReduce está, portanto, presente conceptualmente e
 via *engine*, e não como código repetitivo que teríamos de manter.
 
-### 6.3 Guardar os agregados na cloud / *cache* — justificação por tempo
+### 6.3 Guardar os agregados na cloud / *cache* -- justificação por tempo
 
 A *query* de agregação sobre CHARTEVENTS é a operação cara: na nossa medição, indexar/varrer a
 tabela de ~330 M linhas demorou **~1191 s (~20 min)**. Reexecutar isto a cada iteração do notebook
 seria proibitivo. Por isso:
 
 - **Persistimos os agregados** (média, mín, máx, desvio-padrão, contagem por estadia-conceito) já
-  calculados — tanto do lado do BigQuery (as tabelas carregadas ficam no *dataset*) como num
+  calculados -- tanto do lado do BigQuery (as tabelas carregadas ficam no *dataset*) como num
   **cache local em parquet** (`src/data/loader.py`), indexado por *hash* da *query*.
 - **Justificação:** é uma troca de tempo por espaço. O cálculo pesado faz-se **uma vez**; as
   execuções seguintes leem um ficheiro compacto em segundos. A *correctness* não é afetada porque
   o resultado é determinístico para a mesma *query*.
 
-### 6.4 Otimização de *queries* — o custo mede-se em *bytes processados*, não em "tokens"
+**Porquê Parquet e não CSV.** O *cache* é gravado em **Parquet**, não em CSV, e a diferença é
+relevante para um ficheiro lido repetidamente:
+
+- **Tipos preservados.** O Parquet guarda o **esquema** (cada coluna sabe que é `float32`, `int`,
+  `timestamp`…). Um CSV é apenas texto: a cada leitura o Pandas teria de **re-parsear e re-inferir
+  os tipos** (e *parsear datas* é lento e propenso a erros -- uma coluna numérica pode vir como
+  *string*). Com Parquet, a matriz volta exatamente como foi guardada.
+- **Compressão + menor tamanho.** Sendo **colunar** (ver §6.4) e comprimido, o Parquet ocupa
+  tipicamente **várias vezes menos espaço em disco** que o CSV equivalente.
+- **Leitura mais rápida e parcial.** A leitura é binária (sem *parsing* de texto) e permite ler
+  **apenas as colunas necessárias**, em vez de varrer o ficheiro inteiro como num CSV.
+
+Em suma: para um artefacto intermédio relido a cada execução do notebook, o CSV só traria
+*parsing* repetido, ficheiros maiores e risco de perda de tipos; o Parquet elimina os três.
+
+### 6.4 Otimização de *queries* -- o custo mede-se em *bytes processados*, não em "tokens"
 
 > **Correção de terminologia (e crítica a uma premissa errada).** O custo e a otimização de uma
-> *query* no BigQuery medem-se em **bytes lidos/processados**, não em "tokens" — "tokens" é um
+> *query* no BigQuery medem-se em **bytes lidos/processados**, não em "tokens" -- "tokens" é um
 > conceito de modelos de linguagem (LLMs), que aqui não se aplica. O objetivo correto é **varrer
 > menos bytes**.
+
+**O que significa «colunar».** Um motor de armazenamento *colunar* guarda os valores **coluna a
+coluna** -- todos os `valuenum` num bloco, todos os `charttime` noutro, etc. -- em vez de **linha a
+linha**, como faz um CSV ou uma base de dados transacional clássica (onde os campos de cada linha
+ficam contíguos). A consequência prática é decisiva para este trabalho: ao ler apenas algumas
+colunas, o motor lê **só os blocos dessas colunas** e ignora as restantes. Assim, um
+`SELECT icustay_id, itemid, charttime, valuenum` sobre a tabela CHARTEVENTS (que tem 15 colunas)
+varre aproximadamente **4/15 dos dados**, e não a tabela inteira -- enquanto num formato por linhas
+seria preciso ler todas as linhas completas para extrair 4 campos. É exatamente esta propriedade
+que torna eficazes as otimizações abaixo (e a escolha de Parquet no *cache*, §6.3).
 
 Como o BigQuery é **colunar**, as otimizações que aplicámos foram:
 
@@ -330,22 +386,22 @@ Como o BigQuery é **colunar**, as otimizações que aplicámos foram:
 
 ### 6.5 Memória: *downcasting* de tipos (com a devida ressalva crítica)
 
-Forçar o Pandas a usar tipos mais leves — `float64 → float32`, `int64 → int32` — reduz para
+Forçar o Pandas a usar tipos mais leves -- `float64 → float32`, `int64 → int32` -- reduz para
 **metade** o espaço ocupado *por essas colunas* numéricas. Aplicamo-lo à matriz final de atributos
 (convertida para `float32` em `engineering.py`).
 
 > **Ressalva crítica.** É incorreto afirmar que o *downcasting* "reduz a RAM para metade" de forma
-> geral: (i) só afeta as colunas numéricas a que se aplica — *timestamps*, *strings* e índices não
+> geral: (i) só afeta as colunas numéricas a que se aplica -- *timestamps*, *strings* e índices não
 > encolhem; (ii) pode introduzir **perda de precisão** (somas de grande magnitude, datas); e
 > (iii) **na nossa arquitetura é pouco determinante**, precisamente porque *não* mantemos os 330 M
-> de linhas em Pandas — o BigQuery agrega primeiro e a matriz local é pequena (~10⁵ linhas × ~150
+> de linhas em Pandas -- o BigQuery agrega primeiro e a matriz local é pequena (~10⁵ linhas × ~150
 > colunas). O *downcasting* é, portanto, uma boa prática geral e útil caso alguma vez puxássemos
-> eventos em bruto, mas não é, aqui, a otimização que carrega o desempenho — essa é o empurrar da
+> eventos em bruto, mas não é, aqui, a otimização que carrega o desempenho -- essa é o empurrar da
 > agregação para o BigQuery.
 
 ### 6.6 Comparação de tempo e memória entre algoritmos
 
-Reportamos, para cada modelo, o **tempo de ajuste** (já registado por `harness.py` via
+Reportamos, para cada modelo, o **tempo de treino** (já registado por `harness.py` via
 `fit_time_s` na validação cruzada) e o **pico de memória**. Padrão esperado e a discutir:
 
 | Modelo | Tempo de treino | Memória | Notas |
@@ -361,7 +417,7 @@ A leitura operacional é clara: os modelos de *boosting* por histograma oferecem
 compromisso desempenho/recursos, o que reforça a escolha de SOTA da Fase 4; RF e KNN pagam um
 custo de memória desproporcionado e o SVR simplesmente não escala.
 
-### 6.7 Multiprocessamento — onde o paralelismo é realmente usado
+### 6.7 Multiprocessamento -- onde o paralelismo é realmente usado
 
 - **Lado do servidor (BigQuery):** a agregação distribui-se por muitos *workers* (§6.2).
 - **Validação cruzada e ajuste:** `n_jobs = -1` (joblib) corre os *folds* do `GroupKFold` e as
@@ -372,11 +428,34 @@ custo de memória desproporcionado e o SVR simplesmente não escala.
 **Não** paralelizamos por processos a engenharia de atributos em Pandas: após a agregação, a
 matriz é pequena e vetorizada, pelo que a sobrecarga de um *process pool* só atrasaria.
 
-### 6.8 *Profiling* — tempo total e repartição por fase
+### 6.8 *Profiling* -- tempo total e repartição por fase
 
-Tempo total: **[..] s** — repartido por carregamento (BigQuery), construção de atributos,
+Tempo total: **[..] s** -- repartido por carregamento (BigQuery), construção de atributos,
 exploração não supervisionada, validação cruzada com ablação, e procura de hiperparâmetros (ver
 gráfico de *profiling* no notebook, §6.1).
+
+---
+
+## Resultados
+
+Apresentados aqui, depois da implementação, segundo o protocolo da Fase 5.
+
+| Formulação | Métrica | Sem labs | Com labs | Δ | Literatura |
+|---|---|---|---|---|---|
+| Regressão (afinado, hold-out) | MAE (d) | [..] | [..] | **[..]** | LSTM 3,92 |
+| Regressão | R² | [..] | [..] | **[..]** | ~0,04 |
+| Classificação (melhor) | *quadratic* κ | [..] | [..] | **[..]** | LSTM 0,43 |
+| Classificação | macro-AUROC | [..] | [..] | **[..]** | >7d 0,76 |
+
+Os labs representaram **[..]%** da importância do modelo afinado (indicadores de missingness
+**[..]%**); o ganho concentra-se nos modelos de árvore (o modelo linear quase não beneficia -- os
+labs acrescentam sinal não linear de disfunção orgânica). As **distribuições dos atributos mais
+importantes por *bucket* de LOS** e a **importância de atributos** confirmam que os preditores mais
+fortes são clinicamente plausíveis (labs de função renal/perfusão, vitais e intensidade de
+monitorização, idade). A **tabela de erro por banda** revela o modo de falha universal: **as
+estadias longas são sistematicamente subestimadas** -- coerente com a assimetria do alvo e a
+escassez de exemplos longos. A **matriz de confusão** mostra a confusão concentrada entre *buckets*
+adjacentes (curto↔médio, médio↔longo), e não entre extremos -- o que o kappa quadrático recompensa.
 
 ---
 
@@ -384,7 +463,7 @@ gráfico de *profiling* no notebook, §6.1).
 
 - **Os labs ajudam, na direção esperada.** O MAE de *hold-out* variou [..] d e o *quadratic
   kappa* [..]; os labs representaram [..]% da importância, concentrados nos modelos de árvore (o
-  modelo linear quase não beneficia — os labs acrescentam sinal não linear de disfunção orgânica).
+  modelo linear quase não beneficia -- os labs acrescentam sinal não linear de disfunção orgânica).
   Os indicadores de missingness informativo contribuíram [..]%.
 - **A regressão continua difícil** (R² ≈ [..], MAE ≈ [..] d), mas bate claramente o *baseline* da
   média e alinha-se com a literatura rigorosa de primeiras-24h; a **classificação** (*quadratic
@@ -418,8 +497,8 @@ temporal (por data de admissão) ao longo da transição CareVue → MetaVision.
 7. Dean & Ghemawat (2008). *MapReduce: Simplified Data Processing on Large Clusters*. CACM.
 8. Melnik et al. (2010). *Dremel: Interactive Analysis of Web-Scale Datasets* (motor do BigQuery).
 9. Johnson, Stone, Celi & Pollard (2018). *The MIMIC Code Repository: enabling reproducibility in
-   critical care research*. J Am Med Inform Assoc 25(1):32–39. — fonte das definições de conceito
+   critical care research*. J Am Med Inform Assoc 25(1):32–39. -- fonte das definições de conceito
    (agrupamentos de ITEMIDs CareVue/MetaVision e dos labs). Repositório: MIT-LCP `mimic-code`,
    https://github.com/MIT-LCP/mimic-code (ver `mimic-iii/concepts/`).
-10. MIMIC-III, dicionários `D_ITEMS` e `D_LABITEMS` —
+10. MIMIC-III, dicionários `D_ITEMS` e `D_LABITEMS` --
     https://mimic.mit.edu/docs/iii/tables/d_items/ e `/d_labitems/`.

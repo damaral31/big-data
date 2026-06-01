@@ -174,6 +174,18 @@ def generate(n_stays: int = cfg.SYNTHETIC_N_STAYS, seed: int = cfg.RANDOM_STATE)
     return cohort, aggregates, demographics, lab_aggregates
 
 
+def all_los_hours(n_stays: int = cfg.SYNTHETIC_N_STAYS, seed: int = cfg.RANDOM_STATE):
+    """Synthetic UNFILTERED ICU LOS in hours (includes sub-24h stays).
+
+    Mirrors :func:`src.data.sql.all_los_hours_query` for the Phase-1 window plot;
+    ~20% of stays fall under 24h so the window-exclusion effect is visible.
+    """
+    rng = np.random.default_rng(seed + 1)
+    los_days = np.exp(rng.normal(0.7, 0.9, size=n_stays))   # median ~2d, right-skewed
+    hours = np.clip(los_days * 24.0, 1.0, cfg.MAX_LOS_DAYS * 24.0)
+    return pd.Series(hours, name="los_hours")
+
+
 def patient_timeline(icustay_id: int = 200_000, window_hours: int = 48,
                      seed: int = cfg.RANDOM_STATE) -> pd.DataFrame:
     """Illustrative raw (day_fraction, value, concept) stream for ONE stay.

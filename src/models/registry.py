@@ -111,9 +111,9 @@ def tuned_regressor_search_space():
     if HAS_LGBM:
         base = _tree(LGBMRegressor(n_jobs=NJ, random_state=RS, verbose=-1))
         space = {
-            "model__n_estimators": [200, 400, 800],
+            "model__n_estimators": [200, 400],
             "model__learning_rate": [0.01, 0.03, 0.05, 0.1],
-            "model__num_leaves": [15, 31, 63, 127],
+            "model__num_leaves": [15, 31, 63],
             "model__subsample": [0.7, 0.8, 1.0],
             "model__colsample_bytree": [0.7, 0.8, 1.0],
             "model__min_child_samples": [10, 20, 40],
@@ -121,7 +121,7 @@ def tuned_regressor_search_space():
         return "lightgbm", base, space
     base = _tree(HistGradientBoostingRegressor(random_state=RS))
     space = {
-        "model__max_iter": [200, 400, 800],
+        "model__max_iter": [200, 400],
         "model__learning_rate": [0.01, 0.03, 0.05, 0.1],
         "model__max_leaf_nodes": [15, 31, 63],
         "model__min_samples_leaf": [10, 20, 40],

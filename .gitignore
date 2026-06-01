@@ -180,3 +180,6 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 *_key.json
+# --- project-specific ---
+reports/figures/
+gcp_key.json

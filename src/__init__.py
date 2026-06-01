@@ -1,36 +1,18 @@
+"""MIMIC-III ICU Length-of-Stay prediction pipeline.
+
+Public entry points used by the notebook::
+
+    from src import config
+    from src.data.loader import load_cohort
+    from src.data.splits import (grouped_train_test_split, grouped_cv,
+                                 assert_no_group_leakage)
+    from src.features.engineering import build_feature_matrix
+    from src.models import registry
+    from src.evaluation import harness, metrics
+    from src.evaluation.profiling import Profiler
+    from src.visualization import plots
 """
-MIMIC-III Length of Stay Prediction - ML Pipeline
-Main package initialization
-"""
+from . import config
 
-__version__ = "1.0.0"
-__author__ = "ML Team"
-__description__ = "Comprehensive ML pipeline for ICU length of stay prediction"
-
-# Import main components for easy access
-from data.loader import MIMICDataLoader
-from data.preprocessor import MIMICPreprocessor
-from features.engineering import FeatureEngineer
-from models.base import ModelFactory, BaseModel
-from evaluation.metrics import (
-    RegressionMetrics,
-    ClassificationMetrics,
-    PerformanceProfiler,
-    ResultsAnalyzer,
-    ModelComparison
-)
-from visualization.plots import MIMICVisualizer
-
-__all__ = [
-    'MIMICDataLoader',
-    'MIMICPreprocessor',
-    'FeatureEngineer',
-    'ModelFactory',
-    'BaseModel',
-    'RegressionMetrics',
-    'ClassificationMetrics',
-    'PerformanceProfiler',
-    'ResultsAnalyzer',
-    'ModelComparison',
-    'MIMICVisualizer',
-]
+__all__ = ["config"]
+__version__ = "2.0.0"

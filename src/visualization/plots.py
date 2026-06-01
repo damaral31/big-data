@@ -1,249 +1,227 @@
-# Visualization module for MIMIC-III analysis
-import logging
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-import pandas as pd
-from typing import Optional, List
+"""Plotting helpers.
+
+All functions take prepared dataframes/arrays and return a Matplotlib Figure so
+the notebook can display them inline and/or save them to ``reports/figures``.
+"""
+from __future__ import annotations
+
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
 
-# Set style
+from .. import config as cfg
+
 sns.set_style("whitegrid")
-plt.rcParams['figure.figsize'] = (12, 6)
 
-class MIMICVisualizer:
-    """Create visualizations for MIMIC-III analysis"""
 
-    def __init__(self, output_dir: str = "reports/figures"):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+def save(fig, filename: str) -> Path:
+    path = cfg.FIGURES_DIR / filename
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    return path
 
-    def save_fig(self, filename: str):
-        """Save figure to output directory"""
-        filepath = self.output_dir / filename
-        plt.savefig(filepath, dpi=300, bbox_inches='tight')
-        logger.info(f"Saved figure: {filepath}")
-        plt.close()
 
-    def plot_chart_events_timeline(self, chart_events_df: pd.DataFrame,
-                                   icustay_id: int,
-                                   title: str = None):
-        """Plot chart events timeline for a patient (like the example in assignment)"""
-        df = chart_events_df[chart_events_df['icustay_id'] == icustay_id].copy()
+def patient_timeline(events: pd.DataFrame, icustay_id: int):
+    """Reproduce the assignment's per-patient plot.
 
-        if len(df) == 0:
-            logger.warning(f"No events found for ICU stay {icustay_id}")
-            return
+    X = fraction of a day from ICU admission, Y = measured value, colour = concept.
+    ``events`` columns: day_fraction, value, concept.
+    """
+    fig, ax = plt.subplots(figsize=(11, 6))
+    for concept, grp in events.groupby("concept"):
+        ax.scatter(grp["day_fraction"], grp["value"], s=18, alpha=0.6, label=concept)
+    ax.set_xlabel("Time since ICU admission (days)")
+    ax.set_ylabel("Measured value")
+    ax.set_title(f"ICU chart events over time — ICUSTAY_ID {icustay_id}")
+    ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
+    fig.tight_layout()
+    return fig
 
-        # Convert charttime to hours from start
-        df['charttime'] = pd.to_datetime(df['charttime'])
-        start_time = df['charttime'].min()
-        df['hours_from_start'] = (df['charttime'] - start_time).dt.total_seconds() / 3600
 
-        fig, ax = plt.subplots(figsize=(14, 8))
+def los_distribution(y_days: pd.Series):
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+    axes[0].hist(y_days, bins=60, color="steelblue", edgecolor="black", alpha=0.8)
+    axes[0].axvline(y_days.mean(), color="red", ls="--", label=f"mean {y_days.mean():.1f}d")
+    axes[0].axvline(y_days.median(), color="green", ls="--",
+                    label=f"median {y_days.median():.1f}d")
+    axes[0].set(xlabel="ICU LOS (days)", ylabel="count", title="LOS distribution")
+    axes[0].legend()
+    axes[1].hist(np.log1p(y_days), bins=60, color="darkorange",
+                 edgecolor="black", alpha=0.8)
+    axes[1].set(xlabel="log(1 + LOS days)", ylabel="count",
+                title="LOS distribution (log scale)")
+    fig.tight_layout()
+    return fig
 
-        # Plot each item type with different color
-        for label, group in df.groupby('label'):
-            ax.scatter(group['hours_from_start'] / 24, group['value'],
-                      label=label, s=50, alpha=0.6)
 
-        ax.set_xlabel('Time (Days)', fontsize=12)
-        ax.set_ylabel('Measurement Value', fontsize=12)
-        ax.set_title(title or f'ICU Events Timeline - ICUSTAY_ID {icustay_id}', fontsize=14, fontweight='bold')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9)
-        plt.tight_layout()
+def predicted_vs_actual(y_true, y_pred, model_name: str):
+    y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
+    resid = y_true - y_pred
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    lims = [0, max(y_true.max(), y_pred.max())]
+    axes[0].scatter(y_true, y_pred, s=12, alpha=0.4)
+    axes[0].plot(lims, lims, "r--", lw=2)
+    axes[0].set(xlabel="actual LOS (days)", ylabel="predicted LOS (days)",
+                title=f"{model_name}: predicted vs actual")
+    axes[1].scatter(y_pred, resid, s=12, alpha=0.4)
+    axes[1].axhline(0, color="red", ls="--", lw=2)
+    axes[1].set(xlabel="predicted LOS (days)", ylabel="residual (days)",
+                title=f"{model_name}: residuals")
+    fig.tight_layout()
+    return fig
 
-        self.save_fig(f'timeline_{icustay_id}.png')
 
-    def plot_length_of_stay_distribution(self, los_df: pd.DataFrame,
-                                        figsize: tuple = (12, 6)):
-        """Plot LOS distribution"""
-        fig, axes = plt.subplots(1, 2, figsize=figsize)
+def model_comparison(cv_df: pd.DataFrame, metric_col: str, title: str,
+                     lower_is_better: bool):
+    df = cv_df.sort_values(metric_col, ascending=lower_is_better)
+    std_col = metric_col.replace("_mean", "_std")
+    err = df[std_col] if std_col in df.columns else None
+    fig, ax = plt.subplots(figsize=(9, 0.6 * len(df) + 1.5))
+    ax.barh(df.index, df[metric_col], xerr=err, capsize=4,
+            color="steelblue", alpha=0.8)
+    ax.set(xlabel=metric_col, title=title)
+    ax.invert_yaxis()
+    fig.tight_layout()
+    return fig
 
-        # Histogram
-        axes[0].hist(los_df['length_of_stay'], bins=50, edgecolor='black', alpha=0.7)
-        axes[0].set_xlabel('Length of Stay (Days)', fontsize=11)
-        axes[0].set_ylabel('Frequency', fontsize=11)
-        axes[0].set_title('Length of Stay Distribution', fontsize=12, fontweight='bold')
-        axes[0].axvline(los_df['length_of_stay'].mean(), color='red', linestyle='--',
-                       label=f"Mean: {los_df['length_of_stay'].mean():.1f}")
-        axes[0].axvline(los_df['length_of_stay'].median(), color='green', linestyle='--',
-                       label=f"Median: {los_df['length_of_stay'].median():.1f}")
-        axes[0].legend()
 
-        # Box plot
-        axes[1].boxplot(los_df['length_of_stay'], vert=True)
-        axes[1].set_ylabel('Length of Stay (Days)', fontsize=11)
-        axes[1].set_title('Length of Stay Box Plot', fontsize=12, fontweight='bold')
+def feature_importance(names, importances, top_n: int = 20):
+    order = np.argsort(importances)[::-1][:top_n]
+    fig, ax = plt.subplots(figsize=(9, 0.4 * len(order) + 1.5))
+    ax.barh([names[i] for i in order], [importances[i] for i in order],
+            color="seagreen", alpha=0.85)
+    ax.invert_yaxis()
+    ax.set(xlabel="importance", title=f"Top {top_n} feature importances")
+    fig.tight_layout()
+    return fig
 
-        plt.tight_layout()
-        self.save_fig('los_distribution.png')
 
-    def plot_model_predictions_vs_actual(self, y_true: np.ndarray,
-                                        y_pred: np.ndarray,
-                                        model_name: str = "Model"):
-        """Plot predictions vs actual values"""
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+def confusion(cm: np.ndarray, labels):
+    fig, ax = plt.subplots(figsize=(5.5, 4.5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                xticklabels=labels, yticklabels=labels, ax=ax)
+    ax.set(xlabel="predicted", ylabel="actual", title="Confusion matrix")
+    fig.tight_layout()
+    return fig
 
-        # Scatter plot
-        axes[0].scatter(y_true, y_pred, alpha=0.5, s=30)
-        min_val = min(y_true.min(), y_pred.min())
-        max_val = max(y_true.max(), y_pred.max())
-        axes[0].plot([min_val, max_val], [min_val, max_val], 'r--', lw=2, label='Perfect Prediction')
-        axes[0].set_xlabel('Actual LOS (Days)', fontsize=11)
-        axes[0].set_ylabel('Predicted LOS (Days)', fontsize=11)
-        axes[0].set_title(f'{model_name}: Predictions vs Actual', fontsize=12, fontweight='bold')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
 
-        # Residuals
-        residuals = y_true - y_pred
-        axes[1].scatter(y_pred, residuals, alpha=0.5, s=30)
-        axes[1].axhline(y=0, color='r', linestyle='--', lw=2)
-        axes[1].set_xlabel('Predicted LOS (Days)', fontsize=11)
-        axes[1].set_ylabel('Residuals (Days)', fontsize=11)
-        axes[1].set_title(f'{model_name}: Residual Plot', fontsize=12, fontweight='bold')
-        axes[1].grid(True, alpha=0.3)
+def variance_scree(explained: np.ndarray, top: int = 10):
+    n = min(top, len(explained))
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(range(1, n + 1), explained[:n] * 100, color="steelblue", alpha=0.85)
+    ax.plot(range(1, n + 1), np.cumsum(explained[:n]) * 100, "o-", color="firebrick",
+            label="cumulative")
+    ax.set(xlabel="principal component", ylabel="variance explained (%)",
+           title="PCA scree")
+    ax.legend()
+    fig.tight_layout()
+    return fig
 
-        plt.tight_layout()
-        self.save_fig(f'predictions_{model_name.replace(" ", "_").lower()}.png')
 
-    def plot_model_comparison(self, comparison_df: pd.DataFrame,
-                             metric: str = 'RMSE'):
-        """Plot model comparison"""
-        if metric not in comparison_df.columns:
-            logger.warning(f"Metric {metric} not found in comparison results")
-            return
+def embedding_scatter(coords, color_values, title: str, cbar_label: str = "LOS (days)",
+                      categorical: bool = False):
+    """2-D scatter (PCA or t-SNE) coloured by a value (LOS) or a category."""
+    fig, ax = plt.subplots(figsize=(7.5, 6))
+    if categorical:
+        cats = pd.Series(color_values).astype("category")
+        for c in cats.cat.categories:
+            m = cats.values == c
+            ax.scatter(coords[m, 0], coords[m, 1], s=10, alpha=0.5, label=str(c))
+        ax.legend(title=cbar_label, fontsize=8)
+    else:
+        sc = ax.scatter(coords[:, 0], coords[:, 1], c=np.clip(color_values, 0, 30),
+                        s=10, alpha=0.5, cmap="viridis")
+        fig.colorbar(sc, ax=ax, label=cbar_label)
+    ax.set(title=title, xlabel="dim 1", ylabel="dim 2")
+    fig.tight_layout()
+    return fig
 
-        fig, ax = plt.subplots(figsize=(10, 6))
 
-        # Sort by metric
-        df = comparison_df.sort_values(metric)
-        colors = plt.cm.RdYlGn_r(np.linspace(0.3, 0.7, len(df)))
+def silhouette_plot(k_scores: dict):
+    ks, sc = list(k_scores), list(k_scores.values())
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(ks, sc, "o-", color="slateblue")
+    best = max(k_scores, key=k_scores.get)
+    ax.axvline(best, color="firebrick", ls="--", label=f"best k={best}")
+    ax.set(xlabel="number of clusters (k)", ylabel="mean silhouette",
+           title="KMeans silhouette vs k")
+    ax.legend()
+    fig.tight_layout()
+    return fig
 
-        bars = ax.barh(df['Model'], df[metric], color=colors)
-        ax.set_xlabel(metric, fontsize=11)
-        ax.set_title(f'Model Comparison: {metric}', fontsize=12, fontweight='bold')
 
-        # Add value labels
-        for i, (bar, val) in enumerate(zip(bars, df[metric])):
-            ax.text(val, bar.get_y() + bar.get_height() / 2, f'{val:.3f}',
-                   va='center', ha='left', fontsize=10)
+def feature_distributions_by_class(X: pd.DataFrame, y_clf: pd.Series,
+                                   features: list, order=("short", "medium", "long")):
+    """Small-multiples violin/box of the top features, split by LOS bucket."""
+    feats = [f for f in features if f in X.columns][:9]
+    ncol = 3
+    nrow = int(np.ceil(len(feats) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.2 * ncol, 3.2 * nrow))
+    axes = np.atleast_1d(axes).ravel()
+    df = X.copy()
+    df["__bucket"] = pd.Categorical(y_clf.values, categories=list(order), ordered=True)
+    for ax, f in zip(axes, feats):
+        data = [df.loc[df["__bucket"] == b, f].dropna() for b in order]
+        ax.boxplot(data, labels=list(order), showfliers=False)
+        ax.set_title(f, fontsize=9)
+        ax.tick_params(labelsize=8)
+    for ax in axes[len(feats):]:
+        ax.axis("off")
+    fig.suptitle("Distribution of top features by LOS bucket", fontweight="bold")
+    fig.tight_layout()
+    return fig
 
-        plt.tight_layout()
-        self.save_fig(f'model_comparison_{metric.lower()}.png')
 
-    def plot_feature_importance(self, feature_importance: dict,
-                               top_n: int = 15):
-        """Plot feature importances"""
-        if not feature_importance:
-            logger.warning("No feature importance data available")
-            return
+def patient_vs_population(timeline: pd.DataFrame, concept: str,
+                          pop_mean: float, pop_std: float, icustay_id: int):
+    """One patient's trajectory for a concept vs the cohort's typical band.
 
-        # Get top features
-        sorted_features = sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)[:top_n]
-        features, importances = zip(*sorted_features)
+    Line = the patient's measured values over the first day; shaded area = the
+    cohort mean +/- 1 SD of that concept (so you can see if the patient runs
+    high/low/unstable relative to the population).
+    """
+    g = timeline[timeline["concept"] == concept].sort_values("day_fraction")
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    ax.axhspan(pop_mean - pop_std, pop_mean + pop_std, color="steelblue", alpha=0.15,
+               label="cohort mean +/- 1 SD")
+    ax.axhline(pop_mean, color="steelblue", ls="--", lw=1, label="cohort mean")
+    ax.plot(g["day_fraction"], g["value"], "o-", color="firebrick", ms=4,
+            label=f"patient {icustay_id}")
+    ax.set(xlabel="time since ICU admission (days)", ylabel=concept,
+           title=f"{concept}: patient trajectory vs cohort")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
 
-        fig, ax = plt.subplots(figsize=(10, 8))
-        colors = plt.cm.viridis(np.linspace(0, 1, len(features)))
-        bars = ax.barh(range(len(features)), importances, color=colors)
-        ax.set_yticks(range(len(features)))
-        ax.set_yticklabels(features)
-        ax.invert_yaxis()
-        ax.set_xlabel('Importance', fontsize=11)
-        ax.set_title(f'Top {top_n} Feature Importances', fontsize=12, fontweight='bold')
 
-        # Add value labels
-        for i, (bar, imp) in enumerate(zip(bars, importances)):
-            ax.text(imp, bar.get_y() + bar.get_height() / 2, f'{imp:.4f}',
-                   va='center', ha='left', fontsize=9)
+def missingness_bar(missing_fraction: pd.Series, top: int = 30):
+    s = missing_fraction.sort_values(ascending=False).head(top)
+    fig, ax = plt.subplots(figsize=(9, 0.32 * len(s) + 1.5))
+    ax.barh(s.index, s.values * 100, color="darkorange", alpha=0.85)
+    ax.invert_yaxis()
+    ax.set(xlabel="% missing", title=f"Missingness of top-{top} features")
+    fig.tight_layout()
+    return fig
 
-        plt.tight_layout()
-        self.save_fig('feature_importance.png')
 
-    def plot_error_distribution(self, y_true: np.ndarray,
-                               y_pred: np.ndarray,
-                               model_name: str = "Model"):
-        """Plot error distribution"""
-        errors = np.abs(y_true - y_pred)
+def feature_category_bar(category_counts: pd.Series):
+    fig, ax = plt.subplots(figsize=(8, 0.5 * len(category_counts) + 1.5))
+    ax.barh(category_counts.index, category_counts.values, color="seagreen", alpha=0.85)
+    ax.invert_yaxis()
+    for i, v in enumerate(category_counts.values):
+        ax.text(v, i, f" {v}", va="center", fontsize=9)
+    ax.set(xlabel="number of features", title="Feature inventory by category")
+    fig.tight_layout()
+    return fig
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-        # Histogram
-        axes[0].hist(errors, bins=50, edgecolor='black', alpha=0.7, color='steelblue')
-        axes[0].axvline(np.mean(errors), color='red', linestyle='--', lw=2,
-                       label=f"Mean: {np.mean(errors):.2f}")
-        axes[0].axvline(np.median(errors), color='green', linestyle='--', lw=2,
-                       label=f"Median: {np.median(errors):.2f}")
-        axes[0].set_xlabel('Absolute Error (Days)', fontsize=11)
-        axes[0].set_ylabel('Frequency', fontsize=11)
-        axes[0].set_title(f'{model_name}: Error Distribution', fontsize=12, fontweight='bold')
-        axes[0].legend()
-
-        # Cumulative distribution
-        sorted_errors = np.sort(errors)
-        cumulative = np.arange(1, len(sorted_errors) + 1) / len(sorted_errors)
-        axes[1].plot(sorted_errors, cumulative, linewidth=2)
-        axes[1].axvline(1.0, color='red', linestyle='--', alpha=0.7, label='1 day error')
-        axes[1].axvline(2.0, color='orange', linestyle='--', alpha=0.7, label='2 day error')
-        axes[1].axvline(5.0, color='green', linestyle='--', alpha=0.7, label='5 day error')
-        axes[1].set_xlabel('Absolute Error (Days)', fontsize=11)
-        axes[1].set_ylabel('Cumulative Probability', fontsize=11)
-        axes[1].set_title(f'{model_name}: Cumulative Error Distribution', fontsize=12, fontweight='bold')
-        axes[1].legend()
-        axes[1].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        self.save_fig(f'error_distribution_{model_name.replace(" ", "_").lower()}.png')
-
-    def plot_performance_profiling(self, profile_times: dict):
-        """Plot execution time profiling"""
-        if not profile_times:
-            return
-
-        phases = list(profile_times.keys())
-        times = list(profile_times.values())
-
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-        # Bar plot
-        colors = plt.cm.Set3(np.linspace(0, 1, len(phases)))
-        bars = axes[0].bar(range(len(phases)), times, color=colors, edgecolor='black')
-        axes[0].set_xticks(range(len(phases)))
-        axes[0].set_xticklabels(phases, rotation=45, ha='right')
-        axes[0].set_ylabel('Time (seconds)', fontsize=11)
-        axes[0].set_title('Execution Time by Phase', fontsize=12, fontweight='bold')
-
-        # Add value labels
-        for bar, time in zip(bars, times):
-            height = bar.get_height()
-            axes[0].text(bar.get_x() + bar.get_width()/2., height,
-                        f'{time:.1f}s', ha='center', va='bottom', fontsize=9)
-
-        # Pie chart
-        axes[1].pie(times, labels=phases, autopct='%1.1f%%', startangle=90)
-        axes[1].set_title('Time Distribution', fontsize=12, fontweight='bold')
-
-        plt.tight_layout()
-        self.save_fig('performance_profiling.png')
-
-    def plot_correlation_heatmap(self, features_df: pd.DataFrame,
-                                target_col: str = 'target'):
-        """Plot feature correlation heatmap"""
-        # Select numeric columns
-        numeric_df = features_df.select_dtypes(include=[np.number])
-
-        if len(numeric_df.columns) > 30:
-            # Too many features, select top features
-            numeric_df = numeric_df.iloc[:, :30]
-
-        fig, ax = plt.subplots(figsize=(12, 10))
-        corr = numeric_df.corr()
-        sns.heatmap(corr, cmap='coolwarm', center=0, square=True,
-                   ax=ax, cbar_kws={'label': 'Correlation'})
-        ax.set_title('Feature Correlation Heatmap', fontsize=12, fontweight='bold')
-
-        plt.tight_layout()
-        self.save_fig('correlation_heatmap.png')
+def profiling(profile_df: pd.DataFrame):
+    fig, ax = plt.subplots(figsize=(9, 0.5 * len(profile_df) + 1.5))
+    ax.barh(profile_df["phase"], profile_df["seconds"], color="slateblue",
+            alpha=0.85)
+    ax.invert_yaxis()
+    ax.set(xlabel="seconds", title="Execution time by phase")
+    fig.tight_layout()
+    return fig

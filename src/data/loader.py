@@ -1,216 +1,121 @@
-# Data loading from BigQuery and MIMIC-III
-import os
+"""Data-loading facade: BigQuery first, synthetic fallback.
+
+``load_cohort`` is the single entry point used by the notebook.  It returns the
+same three frames regardless of source so everything downstream is identical:
+
+    cohort        : icustay_id, subject_id, hadm_id, intime, los_icu_days
+    aggregates    : icustay_id, concept, n, mean, min, max, std   (long format)
+    demographics  : icustay_id, subject_id, hadm_id, gender, admission_type, ...
+
+It also reports which source was used so the notebook can print an honest banner.
+"""
+from __future__ import annotations
+
+import hashlib
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, List, Tuple
+
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
 
-try:
-    from google.cloud import bigquery
-except ImportError:
-    bigquery = None
+from .. import config as cfg
+from . import sql, synthetic
 
-from config import (
-    GCP_CREDENTIALS_PATH, GCP_PROJECT_ID, CHARTEVENTS_TABLE,
-    D_ITEMS_TABLE, ADMISSIONS_TABLE, ICUSTAYS_TABLE, PATIENTS_TABLE,
-    CACHE_DIR, CACHE_QUERIES, VERBOSE
-)
-
-logging.basicConfig(level=logging.INFO if VERBOSE else logging.WARNING)
 logger = logging.getLogger(__name__)
 
-class MIMICDataLoader:
-    """Load and manage MIMIC-III data from BigQuery"""
+try:  # optional dependency -- only needed for the real path
+    from google.cloud import bigquery
+except Exception:  # pragma: no cover
+    bigquery = None
+
+
+@dataclass
+class CohortData:
+    cohort: pd.DataFrame
+    aggregates: pd.DataFrame          # CHARTEVENTS vitals (long)
+    demographics: pd.DataFrame
+    source: str                       # "BIGQUERY" or "SYNTHETIC"
+    lab_aggregates: pd.DataFrame = field(default_factory=pd.DataFrame)  # LABEVENTS (long)
+
+    @property
+    def is_real(self) -> bool:
+        return self.source == "BIGQUERY"
+
+
+class BigQueryClient:
+    """Thin wrapper around the BigQuery client with parquet result caching."""
 
     def __init__(self):
-        """Initialize BigQuery client"""
-        self.client = None
-        self._initialize_client()
+        if bigquery is None:
+            raise RuntimeError("google-cloud-bigquery is not installed")
+        if cfg.GCP_CREDENTIALS_PATH:
+            import os
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cfg.GCP_CREDENTIALS_PATH
+        self.client = bigquery.Client(project=cfg.GCP_PROJECT_ID)
+        logger.info("BigQuery client ready (project=%s)", cfg.GCP_PROJECT_ID)
 
-    def _initialize_client(self):
-        """Initialize BigQuery client with authentication"""
-        if not os.path.exists(GCP_CREDENTIALS_PATH):
-            logger.warning(f"GCP credentials not found at {GCP_CREDENTIALS_PATH}")
-            logger.info("Attempting to use default credentials...")
+    def _cache_path(self, query: str, tag: str) -> Path:
+        h = hashlib.md5(query.encode()).hexdigest()[:10]
+        return cfg.CACHE_DIR / f"{tag}_{h}.parquet"
 
-        try:
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = GCP_CREDENTIALS_PATH
-            self.client = bigquery.Client(project=GCP_PROJECT_ID)
-            logger.info(f"BigQuery client initialized for project {GCP_PROJECT_ID}")
-        except Exception as e:
-            logger.warning(f"Failed to initialize BigQuery client: {e}")
-            logger.info("Data loading will be unavailable")
+    def run(self, query: str, tag: str) -> pd.DataFrame:
+        cache = self._cache_path(query, tag)
+        if cfg.CACHE_QUERIES and cache.exists():
+            logger.info("Loading cached %s (%s)", tag, cache.name)
+            return pd.read_parquet(cache)
 
-    def _get_cache_path(self, query_name: str) -> Path:
-        """Get cache file path for query"""
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        return CACHE_DIR / f"{query_name}_{datetime.now().strftime('%Y%m%d')}.parquet"
-
-    def _load_cached_query(self, query_name: str) -> Optional[pd.DataFrame]:
-        """Load cached query result"""
-        if not CACHE_QUERIES:
-            return None
-
-        cache_path = self._get_cache_path(query_name)
-        if cache_path.exists():
-            logger.info(f"Loading cached query: {query_name}")
-            return pd.read_parquet(cache_path)
-        return None
-
-    def _cache_query_result(self, query_name: str, df: pd.DataFrame):
-        """Cache query result"""
-        if not CACHE_QUERIES:
-            return
-
-        cache_path = self._get_cache_path(query_name)
-        df.to_parquet(cache_path)
-        logger.info(f"Cached query result: {query_name} ({len(df)} rows)")
-
-    def query_bigquery(self, query: str, query_name: str = "query") -> pd.DataFrame:
-        """Execute BigQuery query with caching"""
-        # Try to load from cache first
-        cached_df = self._load_cached_query(query_name)
-        if cached_df is not None:
-            return cached_df
-
-        if self.client is None:
-            raise RuntimeError("BigQuery client not initialized")
-
-        logger.info(f"Executing BigQuery query: {query_name}")
+        logger.info("Running BigQuery job: %s", tag)
         df = self.client.query(query).to_dataframe()
-        logger.info(f"Query returned {len(df)} rows")
-
-        self._cache_query_result(query_name, df)
+        df.columns = [c.lower() for c in df.columns]
+        logger.info("  -> %s rows", len(df))
+        if cfg.CACHE_QUERIES:
+            df.to_parquet(cache, index=False)
         return df
 
-    def get_patient_demographics(self, subject_ids: Optional[List[int]] = None) -> pd.DataFrame:
-        """Load patient demographics"""
-        if subject_ids:
-            ids_str = ",".join(map(str, subject_ids))
-            where_clause = f"WHERE subject_id IN ({ids_str})"
-        else:
-            where_clause = ""
 
-        query = f"""
-        SELECT DISTINCT
-            subject_id,
-            gender,
-            dob,
-            dod
-        FROM `{PATIENTS_TABLE}`
-        {where_clause}
-        """
+def _try_bigquery(window_hours: int, limit: int | None,
+                  include_labs: bool) -> CohortData | None:
+    if bigquery is None or cfg.GCP_CREDENTIALS_PATH is None:
+        logger.info("BigQuery unavailable (no client or no credentials).")
+        return None
+    try:
+        client = BigQueryClient()
+        cohort = client.run(sql.cohort_query(limit), "cohort")
+        aggregates = client.run(
+            sql.window_aggregates_query(window_hours, limit), "agg")
+        demographics = client.run(sql.demographics_query(limit), "demo")
+        labs = pd.DataFrame()
+        if include_labs:
+            labs = client.run(
+                sql.window_lab_aggregates_query(window_hours, limit), "lab_agg")
+        return CohortData(cohort, aggregates, demographics, "BIGQUERY",
+                          lab_aggregates=labs)
+    except Exception as exc:  # pragma: no cover - network/credential dependent
+        logger.warning("BigQuery path failed (%s); falling back to synthetic.", exc)
+        return None
 
-        return self.query_bigquery(query, "patient_demographics")
 
-    def get_admissions(self, subject_ids: Optional[List[int]] = None) -> pd.DataFrame:
-        """Load admission records"""
-        if subject_ids:
-            ids_str = ",".join(map(str, subject_ids))
-            where_clause = f"WHERE subject_id IN ({ids_str})"
-        else:
-            where_clause = ""
+def load_cohort(
+    use_bigquery: bool = True,
+    window_hours: int = cfg.PREDICTION_WINDOW_HOURS,
+    limit: int | None = cfg.DEV_ICUSTAY_LIMIT,
+    include_labs: bool = cfg.INCLUDE_LABS,
+) -> CohortData:
+    """Load cohort + first-window vital aggregates + demographics + lab aggregates.
 
-        query = f"""
-        SELECT
-            hadm_id,
-            subject_id,
-            admittime,
-            dischtime,
-            admission_type,
-            TIMESTAMP_DIFF(dischtime, admittime, HOUR) / 24.0 AS length_of_stay
-        FROM `{ADMISSIONS_TABLE}`
-        {where_clause}
-        ORDER BY subject_id, admittime
-        """
+    Tries BigQuery when ``use_bigquery`` and credentials exist; otherwise (or on
+    any failure) returns a clearly-labelled synthetic cohort of the same shape.
+    ``include_labs`` controls whether the LABEVENTS aggregation is loaded.
+    """
+    if use_bigquery:
+        data = _try_bigquery(window_hours, limit, include_labs)
+        if data is not None:
+            return data
 
-        return self.query_bigquery(query, "admissions")
-
-    def get_icu_stays(self, subject_ids: Optional[List[int]] = None) -> pd.DataFrame:
-        """Load ICU stay records"""
-        if subject_ids:
-            ids_str = ",".join(map(str, subject_ids))
-            where_clause = f"WHERE subject_id IN ({ids_str})"
-        else:
-            where_clause = ""
-
-        query = f"""
-        SELECT
-            icustay_id,
-            hadm_id,
-            subject_id,
-            intime,
-            outtime,
-            TIMESTAMP_DIFF(outtime, intime, HOUR) / 24.0 AS los_icu_days
-        FROM `{ICUSTAYS_TABLE}`
-        {where_clause}
-        ORDER BY subject_id, intime
-        """
-
-        return self.query_bigquery(query, "icu_stays")
-
-    def get_chart_events(self, icustay_ids: List[int],
-                         value_only: bool = True) -> pd.DataFrame:
-        """Load chart events for specific ICU stays"""
-        ids_str = ",".join(map(str, icustay_ids))
-
-        value_filter = "AND c.VALUENUM IS NOT NULL" if value_only else ""
-
-        query = f"""
-        SELECT
-            c.icustay_id,
-            c.hadm_id,
-            c.subject_id,
-            c.charttime,
-            c.itemid,
-            c.valuenum AS value,
-            c.valueuom,
-            d.label,
-            d.category
-        FROM `{CHARTEVENTS_TABLE}` c
-        LEFT JOIN `{D_ITEMS_TABLE}` d ON c.itemid = d.itemid
-        WHERE c.icustay_id IN ({ids_str})
-        {value_filter}
-        ORDER BY c.charttime
-        """
-
-        return self.query_bigquery(query, f"chart_events_{len(icustay_ids)}_stays")
-
-    def get_items_catalog(self) -> pd.DataFrame:
-        """Load item catalog (measurements reference)"""
-        query = f"""
-        SELECT DISTINCT
-            itemid,
-            label,
-            abbreviation,
-            category,
-            unitname
-        FROM `{D_ITEMS_TABLE}`
-        ORDER BY category, label
-        """
-
-        return self.query_bigquery(query, "items_catalog")
-
-    def sample_patient_data(self, n_samples: int = 100,
-                            min_los_hours: float = 6) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Sample patients for analysis (useful for development)"""
-        query = f"""
-        WITH sampled_stays AS (
-            SELECT
-                i.subject_id,
-                i.hadm_id,
-                i.icustay_id,
-                i.intime,
-                i.outtime,
-                TIMESTAMP_DIFF(i.outtime, i.intime, HOUR) AS los_hours
-            FROM `{ICUSTAYS_TABLE}` i
-            WHERE TIMESTAMP_DIFF(i.outtime, i.intime, HOUR) >= {min_los_hours}
-            ORDER BY RAND()
-            LIMIT {n_samples}
-        )
-        SELECT * FROM sampled_stays
-        """
-
-        return self.query_bigquery(query, f"sample_stays_{n_samples}")
+    logger.warning("Using SYNTHETIC data -- results are for demonstration only.")
+    n = limit or cfg.SYNTHETIC_N_STAYS
+    cohort, aggregates, demographics, labs = synthetic.generate(n_stays=n)
+    if not include_labs:
+        labs = pd.DataFrame()
+    return CohortData(cohort, aggregates, demographics, "SYNTHETIC",
+                      lab_aggregates=labs)

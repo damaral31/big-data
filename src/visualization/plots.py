@@ -31,7 +31,8 @@ def patient_timeline(events: pd.DataFrame, icustay_id: int):
     """
     fig, ax = plt.subplots(figsize=(11, 6))
     for concept, grp in events.groupby("concept"):
-        ax.scatter(grp["day_fraction"], grp["value"], s=18, alpha=0.6, label=concept)
+        grp = grp.sort_values("day_fraction")
+        ax.plot(grp["day_fraction"], grp["value"], lw=1.2, alpha=0.8, label=concept)
     ax.set_xlabel("Time since ICU admission (days)")
     ax.set_ylabel("Measured value")
     ax.set_title(f"ICU chart events over time — ICUSTAY_ID {icustay_id}")
